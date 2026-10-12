@@ -52,7 +52,7 @@ The root EXE is the bundled snapshot; rebuilding does not silently replace it.
 | `test_*.py` | Automated checks |
 | `InfinixGTToolkit.spec`, `version_info.txt` | Executable packaging |
 | `assets/` | App artwork |
-| `.github/workflows/release.yml` | Windows build and draft release workflow |
+| `.github/workflows/release.yml` | Windows build and release workflow |
 
 ## Publish and share
 

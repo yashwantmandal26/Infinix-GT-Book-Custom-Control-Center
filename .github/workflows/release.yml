@@ -33,7 +33,7 @@ jobs:
           name: windows-release
           path: release/*
 
-  draft-release:
+  publish-release:
     if: startsWith(github.ref, 'refs/tags/')
     needs: build
     runs-on: ubuntu-latest
@@ -44,9 +44,9 @@ jobs:
         with:
           name: windows-release
           path: release
-      - name: Create draft release
+      - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           RELEASE_TAG: ${{ github.ref_name }}
-        run: gh release create "$RELEASE_TAG" release/* --draft --verify-tag --generate-notes --title "Infinix GT Toolkit $RELEASE_TAG"
+        run: gh release create "$RELEASE_TAG" release/* --verify-tag --generate-notes --title "Infinix GT Toolkit $RELEASE_TAG"
