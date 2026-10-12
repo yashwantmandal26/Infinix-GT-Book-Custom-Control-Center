@@ -17,6 +17,7 @@ An open-source Windows control center for the **Infinix GT Book**, built for own
 ## Main features
 
 - **Four-zone keyboard RGB** with independent colours, brightness, speed, direction, and effect controls.
+- **Four original keyboard motions**: Magnetic Slingshot, Chromatic Relay, Time Fracture, and Orbital Eclipse.
 - **Rear Mecha Bar control** for supported firmware, animated, audio-reactive, and system-reactive modes.
 - **Performance controls** for operating modes, CPU/GPU settings, and fan behaviour.
 - **Live mini monitor** for temperatures, load, memory, battery, fan, and power data.
@@ -88,8 +89,8 @@ powershell -ExecutionPolicy Bypass -File .\scripts\test.ps1
 
 ## Project status
 
-- Current release: **v4.5.1**
-- Focused validation: **51 tests passed, including 9 protocol subtests**
+- Current release: **v4.5.2**
+- Focused validation: **54 tests and 17 subtests passed**
 - The project is community-made and is not affiliated with Infinix
 - Contributions, hardware observations, and reproducible bug reports are welcome
 

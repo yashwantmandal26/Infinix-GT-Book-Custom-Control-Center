@@ -1,5 +1,5 @@
 """
-Infinix GT Toolkit v4.5.1
+Infinix GT Toolkit v4.5.2
 =============================
 Commercial-grade, eye-pleasing hardware control suite & intelligent automation engine
 crafted specifically for the Infinix GT Book (Model GL613 / BYD N16 chassis).
@@ -74,6 +74,7 @@ from hardware_runtime import HardwareCommandController, CommandResult, format_re
 from automation_policy import AutomationPolicy
 from update_service import GitHubUpdateService
 import color_studio
+from keyboard_motion import CUSTOM_MOTION_EFFECTS, render_custom_motion
 from color_studio import (
     ColorPickerDialog, normalize_hex_color, rgb_to_hex, hex_to_rgb,
     rgb_to_hsv_display, hsv_display_to_rgb, best_text_color,
@@ -111,7 +112,7 @@ CONFIG_FILE = os.path.join(CONFIG_DIR, "config_v4.json")
 CRASH_LOG_FILE = os.path.join(CONFIG_DIR, "crash.log")
 STARTUP_DIR = os.path.join(os.environ.get("APPDATA", ""), r"Microsoft\Windows\Start Menu\Programs\Startup")
 SHORTCUT_PATH = os.path.join(STARTUP_DIR, "InfinixGTToolkit.lnk")
-APP_VERSION = "4.5.1"
+APP_VERSION = "4.5.2"
 BUILD_CHANNEL = "Stable"
 BUILD_DATE = "2026-10-12"
 UPDATE_REPOSITORY = "yashwantmandal26/Infinix-GT-Book-Custom-Control-Center"
@@ -262,8 +263,8 @@ LEGACY_ANIMATION_DIRECTIONS = {
     "🔄 Clockwise": ANIMATION_DIRECTIONS[0],
     "🔁 Counter-CW": ANIMATION_DIRECTIONS[1],
 }
-DIRECTIONAL_EFFECTS = {"Aurora", "AllAurora", "Wave", "ColorShift", "RainbowPrism", "BlazingFire"}
-SPEED_CONTROLLED_EFFECTS = {"Aurora", "AllAurora", "Wave", "RandomMorph", "BreathingPulse", "ColorShift", "RainbowPrism", "BlazingFire"}
+DIRECTIONAL_EFFECTS = {"Aurora", "AllAurora", "Wave", "ColorShift", "RainbowPrism", "BlazingFire", *CUSTOM_MOTION_EFFECTS}
+SPEED_CONTROLLED_EFFECTS = {"Aurora", "AllAurora", "Wave", "RandomMorph", "BreathingPulse", "ColorShift", "RainbowPrism", "BlazingFire", *CUSTOM_MOTION_EFFECTS}
 
 EFFECT_DISPLAY_NAMES = {
     "Solid": "🌈 Solid Calm",
@@ -278,6 +279,10 @@ EFFECT_DISPLAY_NAMES = {
     "ScreenSync": "🎬 Screen Sync",
     "ReactiveTyping": "⚡ Reactive Typing",
     "AudioSync": "🎵 Audio Visualizer",
+    "MagneticSlingshot": "🧲 Magnetic Slingshot",
+    "ChromaticRelay": "🧬 Chromatic Relay",
+    "TimeFracture": "⏳ Time Fracture",
+    "OrbitalEclipse": "🪐 Orbital Eclipse",
 }
 
 def render_all_aurora(
@@ -675,7 +680,7 @@ def validate_lighting_preset(data):
     if type(brightness) is not int or not 0 <= brightness <= 100:
         raise ValueError("Brightness must be an integer between 0 and 100.")
     effect = data.get("effect_mode", "Solid")
-    if effect not in {"Solid", "Aurora", "AllAurora", "Wave", "RandomMorph", "BreathingPulse", "ColorShift", "ScreenSync", "ReactiveTyping", "AudioSync", "RainbowPrism", "BlazingFire"}:
+    if effect not in {"Solid", "Aurora", "AllAurora", "Wave", "RandomMorph", "BreathingPulse", "ColorShift", "ScreenSync", "ReactiveTyping", "AudioSync", "RainbowPrism", "BlazingFire", *CUSTOM_MOTION_EFFECTS}:
         raise ValueError("Unsupported lighting effect.")
     power = data.get("power_mode", "Balanced")
     if power not in {"Quiet", "Balanced", "Beast"}:
@@ -3366,7 +3371,11 @@ class InfinixGTToolkitApp:
             ("🎨 Color Shift", "ColorShift"),
             ("🎬 Screen Sync", "ScreenSync"),
             ("⚡ Reactive Typing", "ReactiveTyping"),
-            ("🎵 Audio Visualizer", "AudioSync")
+            ("🎵 Audio Visualizer", "AudioSync"),
+            ("🧲 Magnetic Slingshot", "MagneticSlingshot"),
+            ("🧬 Chromatic Relay", "ChromaticRelay"),
+            ("⏳ Time Fracture", "TimeFracture"),
+            ("🪐 Orbital Eclipse", "OrbitalEclipse"),
         ]
         
         descriptions = {
@@ -3376,6 +3385,8 @@ class InfinixGTToolkitApp:
             "RandomMorph": "Unexpected color blends", "BreathingPulse": "A gentle rise and fall",
             "ColorShift": "Smooth color transitions", "ScreenSync": "Match what is on screen",
             "ReactiveTyping": "Respond to each keystroke", "AudioSync": "Move with your music",
+            "MagneticSlingshot": "Collide, swap, and release", "ChromaticRelay": "Pass colour zone to zone",
+            "TimeFracture": "Freeze, rewind, fast-forward", "OrbitalEclipse": "Moving shadow and bright rim",
         }
         effect_grid = neon_ui.Frame(card_fx, fg_color="transparent")
         effect_grid.pack(fill="x", padx=12, pady=(0, 6))
@@ -5490,6 +5501,10 @@ class InfinixGTToolkitApp:
                         initial_zones = render_blazing_fire(0.0, direction)
                     elif self.effect_mode == "Aurora":
                         initial_zones = render_aurora(0.0, direction)
+                    elif self.effect_mode in CUSTOM_MOTION_EFFECTS:
+                        initial_zones = render_custom_motion(
+                            self.effect_mode, 0.0, direction, self.current_color,
+                            self.zones.get("4", (167, 139, 250)))
                     else:
                         initial_zones = self.zones
 
@@ -5548,6 +5563,10 @@ class InfinixGTToolkitApp:
                 initial_zones = render_blazing_fire(0.0, direction)
             elif self.effect_mode == "Aurora":
                 initial_zones = render_aurora(0.0, direction)
+            elif self.effect_mode in CUSTOM_MOTION_EFFECTS:
+                initial_zones = render_custom_motion(
+                    self.effect_mode, 0.0, direction, self.current_color,
+                    self.zones.get("4", (167, 139, 250)))
             elif self.effect_mode == "ReactiveTyping":
                 initial_zones = render_reactive_typing(
                     getattr(self, '_zone_typing_times', {}),
@@ -5563,7 +5582,7 @@ class InfinixGTToolkitApp:
             if self.config.get("mecha_bar_enabled", True):
                 if self.config.get("mecha_bar_sync", True):
                     lead_zone = "1"
-                    if self.effect_mode in ("Aurora", "AllAurora", "RainbowPrism", "BlazingFire", "ReactiveTyping"):
+                    if self.effect_mode in ("Aurora", "AllAurora", "RainbowPrism", "BlazingFire", "ReactiveTyping", *CUSTOM_MOTION_EFFECTS):
                         lead_zone = max(("1", "2", "3", "4"), key=lambda z: sum(initial_zones.get(z, (0, 0, 0))))
                     elif self.effect_mode == "Wave":
                         lead_zone = "4" if "Right to Left" in direction else "1"
@@ -5867,7 +5886,8 @@ class InfinixGTToolkitApp:
             "ColorShift",
             "ScreenSync",
             "ReactiveTyping",
-            "AudioSync"
+            "AudioSync",
+            *CUSTOM_MOTION_EFFECTS,
         ]
         cur = self.effect_mode
         try:
@@ -7136,7 +7156,18 @@ class InfinixGTToolkitApp:
                         mult = speed_mult.get(self.anim_speed, 1.0)
                         direction = normalize_animation_direction(getattr(self, 'anim_direction', None))
 
-                        if self.effect_mode == "Aurora":
+                        if self.effect_mode in CUSTOM_MOTION_EFFECTS:
+                            motion_zones = render_custom_motion(
+                                self.effect_mode, step, direction, self.current_color,
+                                self.zones.get("4", (167, 139, 250)))
+                            HardwareEngine.send_4zone_rgb(
+                                motion_zones, self.brightness, set_mode_static=force_static)
+                            if self.config.get("mecha_bar_enabled", True):
+                                lead_zone = max(motion_zones, key=lambda z: sum(motion_zones[z]))
+                                self._sync_mecha_bar(*motion_zones[lead_zone])
+                            self._ui_dispatch(self._update_virtual_keyboard_preview, motion_zones)
+
+                        elif self.effect_mode == "Aurora":
                             aurora_zones = render_aurora(step, direction)
                             HardwareEngine.send_4zone_rgb(aurora_zones, self.brightness, set_mode_static=force_static)
                             if self.config.get("mecha_bar_enabled", True):
