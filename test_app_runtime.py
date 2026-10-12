@@ -17,6 +17,12 @@ import studio_ui
 
 
 class RuntimeTests(unittest.TestCase):
+    def test_windows_startup_command_always_launches_in_background(self):
+        with patch.object(toolkit.os.path, "exists", return_value=True):
+            command = toolkit.startup_command_target()
+        self.assertTrue(command.endswith(" --minimized"))
+        self.assertIn("InfinixGTToolkit.exe", command)
+
     def test_hardware_controller_serializes_retries_and_blocks_duplicates(self):
         callbacks = []
         gate = threading.Event()

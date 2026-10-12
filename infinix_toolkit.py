@@ -1,5 +1,5 @@
 """
-Infinix GT Toolkit v4.5.0
+Infinix GT Toolkit v4.5.1
 =============================
 Commercial-grade, eye-pleasing hardware control suite & intelligent automation engine
 crafted specifically for the Infinix GT Book (Model GL613 / BYD N16 chassis).
@@ -111,10 +111,25 @@ CONFIG_FILE = os.path.join(CONFIG_DIR, "config_v4.json")
 CRASH_LOG_FILE = os.path.join(CONFIG_DIR, "crash.log")
 STARTUP_DIR = os.path.join(os.environ.get("APPDATA", ""), r"Microsoft\Windows\Start Menu\Programs\Startup")
 SHORTCUT_PATH = os.path.join(STARTUP_DIR, "InfinixGTToolkit.lnk")
-APP_VERSION = "4.5.0"
+APP_VERSION = "4.5.1"
 BUILD_CHANNEL = "Stable"
 BUILD_DATE = "2026-10-12"
 UPDATE_REPOSITORY = "yashwantmandal26/Infinix-GT-Book-Custom-Control-Center"
+
+
+def startup_command_target():
+    """Return the Task Scheduler command used for a silent background launch."""
+    root_exe = os.path.join(APP_DIR, "InfinixGTToolkit.exe")
+    if os.path.exists(root_exe):
+        launch = f'"{root_exe}"'
+    elif getattr(sys, "frozen", False):
+        launch = f'"{sys.executable}"'
+    else:
+        python_w = sys.executable.replace("python.exe", "pythonw.exe")
+        if not os.path.exists(python_w):
+            python_w = sys.executable
+        launch = f'"{python_w}" "{os.path.abspath(__file__)}"'
+    return f"{launch} --minimized"
 
 
 def log_crash_exception(exc_type, exc_value, exc_traceback, context: str = "Unhandled Exception"):
@@ -2211,6 +2226,10 @@ class InfinixGTToolkitApp:
         studio_ui.configure_controls(THEME)
 
         self.root = ctk.CTk()
+        # Hide before styling or constructing widgets so an autostart launch
+        # never flashes the dashboard on the desktop.
+        if self.is_minimized:
+            self.root.withdraw()
         self.root.configure(fg_color=THEME["root_bg"])
         self._drain_job = self.root.after(40, self._drain_ui_mailbox)
         self.root.bind("<Destroy>", self._on_root_destroyed, add="+")
@@ -4473,7 +4492,7 @@ class InfinixGTToolkitApp:
 
         ctk.CTkLabel(
             card_start,
-            text="Automatically opens the dashboard and restores your saved settings after Windows sign-in.",
+            text="Starts silently in the notification area and restores your saved settings after Windows sign-in.",
             font=ctk.CTkFont(size=13), text_color=THEME["text_secondary"]
         ).pack(anchor="w", padx=16, pady=(0, 14))
 
@@ -6957,16 +6976,7 @@ class InfinixGTToolkitApp:
 
     def _manage_startup_shortcut(self, enable: bool):
         """Register elevated scheduled task and Windows Run key for instant logon startup and Task Manager integration."""
-        root_exe = os.path.join(APP_DIR, "InfinixGTToolkit.exe")
-        if os.path.exists(root_exe):
-            cmd_target = f'"{root_exe}"'
-        elif getattr(sys, 'frozen', False):
-            cmd_target = f'"{sys.executable}"'
-        else:
-            python_w = sys.executable.replace("python.exe", "pythonw.exe")
-            if not os.path.exists(python_w):
-                python_w = sys.executable
-            cmd_target = f'"{python_w}" "{os.path.abspath(__file__)}"'
+        cmd_target = startup_command_target()
 
         task_name = "InfinixGTToolkit"
         run_key_name = "InfinixGTToolkit"
