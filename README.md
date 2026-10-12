@@ -89,7 +89,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\test.ps1
 ## Project status
 
 - Current release: **v4.5.1**
-- Focused validation: **50 tests passed, including 9 protocol subtests**
+- Focused validation: **51 tests passed, including 9 protocol subtests**
 - The project is community-made and is not affiliated with Infinix
 - Contributions, hardware observations, and reproducible bug reports are welcome
 
