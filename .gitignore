@@ -1,0 +1,25 @@
+# Local environments, generated artifacts and private runtime data
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+build*/
+dist*/
+release/
+*.exe
+*.zip
+*.log
+*.bak
+.env
+.env.*
+!.env.example
+config.ini
+LightConfig.dat
+ProjectLogs/
+*_probe.json
+*_preview.png
+/color_picker_*.png
+/zone_card_*.png
+update-manifest.json
+BUILD_INFO.json
+SHA256SUMS.txt

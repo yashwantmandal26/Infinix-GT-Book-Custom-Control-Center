@@ -1,0 +1,13 @@
+customtkinter
+hidapi
+keyboard
+mss
+numpy
+pillow
+psutil
+pyserial
+pystray
+pywin32
+soundcard
+WMI
+pyinstaller

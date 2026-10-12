@@ -1,0 +1,235 @@
+[
+  {
+    "name": "pyinstaller",
+    "version": "6.22.3",
+    "license": "GPLv2-or-later with a special exception which allows to use PyInstaller to build and distribute non-free programs (including commercial ones)",
+    "files": [
+      "third_party_licenses\\pyinstaller\\pyinstaller-6.22.3.dist-info__licenses__COPYING.txt"
+    ]
+  },
+  {
+    "name": "setuptools",
+    "version": "83.0.0",
+    "license": "MIT",
+    "files": [
+      "third_party_licenses\\setuptools\\setuptools-83.0.0.dist-info__licenses__LICENSE",
+      "third_party_licenses\\setuptools\\setuptools___vendor__autocommand-2.2.2.dist-info__LICENSE",
+      "third_party_licenses\\setuptools\\setuptools___vendor__backports.tarfile-1.2.0.dist-info__LICENSE",
+      "third_party_licenses\\setuptools\\setuptools___vendor__importlib_metadata-8.7.1.dist-info__licenses__LICENSE",
+      "third_party_licenses\\setuptools\\setuptools___vendor__jaraco.text-4.0.0.dist-info__LICENSE",
+      "third_party_licenses\\setuptools\\setuptools___vendor__jaraco_context-6.1.0.dist-info__licenses__LICENSE",
+      "third_party_licenses\\setuptools\\setuptools___vendor__jaraco_functools-4.4.0.dist-info__licenses__LICENSE",
+      "third_party_licenses\\setuptools\\setuptools___vendor__more_itertools-10.8.0.dist-info__licenses__LICENSE",
+      "third_party_licenses\\setuptools\\setuptools___vendor__packaging-26.0.dist-info__licenses__LICENSE",
+      "third_party_licenses\\setuptools\\setuptools___vendor__packaging-26.0.dist-info__licenses__LICENSE.APACHE",
+      "third_party_licenses\\setuptools\\setuptools___vendor__packaging-26.0.dist-info__licenses__LICENSE.BSD",
+      "third_party_licenses\\setuptools\\setuptools___vendor__platformdirs-4.4.0.dist-info__licenses__LICENSE",
+      "third_party_licenses\\setuptools\\setuptools___vendor__tomli-2.4.0.dist-info__licenses__LICENSE",
+      "third_party_licenses\\setuptools\\setuptools___vendor__wheel-0.46.3.dist-info__licenses__LICENSE.txt",
+      "third_party_licenses\\setuptools\\setuptools___vendor__zipp-3.23.0.dist-info__licenses__LICENSE",
+      "third_party_licenses\\setuptools\\setuptools__config__NOTICE",
+      "third_party_licenses\\setuptools\\setuptools__config___validate_pyproject__NOTICE"
+    ]
+  },
+  {
+    "name": "pywin32-ctypes",
+    "version": "0.2.3",
+    "license": "BSD-3-Clause",
+    "files": [
+      "third_party_licenses\\pywin32-ctypes\\pywin32_ctypes-0.2.3.dist-info__LICENSE.txt"
+    ]
+  },
+  {
+    "name": "pyinstaller-hooks-contrib",
+    "version": "2026.7",
+    "license": "",
+    "files": [
+      "third_party_licenses\\pyinstaller-hooks-contrib\\pyinstaller_hooks_contrib-2026.7.dist-info__licenses__LICENSE"
+    ]
+  },
+  {
+    "name": "packaging",
+    "version": "26.2",
+    "license": "Apache-2.0 OR BSD-2-Clause",
+    "files": [
+      "third_party_licenses\\packaging\\packaging-26.2.dist-info__licenses__LICENSE",
+      "third_party_licenses\\packaging\\packaging-26.2.dist-info__licenses__LICENSE.APACHE",
+      "third_party_licenses\\packaging\\packaging-26.2.dist-info__licenses__LICENSE.BSD"
+    ]
+  },
+  {
+    "name": "pefile",
+    "version": "2024.8.26",
+    "license": "MIT",
+    "files": [
+      "third_party_licenses\\pefile\\pefile-2024.8.26.dist-info__LICENSE"
+    ]
+  },
+  {
+    "name": "altgraph",
+    "version": "0.17.5",
+    "license": "MIT",
+    "files": [
+      "third_party_licenses\\altgraph\\altgraph-0.17.5.dist-info__LICENSE"
+    ]
+  },
+  {
+    "name": "WMI",
+    "version": "1.5.1",
+    "license": "http://www.opensource.org/licenses/mit-license.php",
+    "files": []
+  },
+  {
+    "name": "pywin32",
+    "version": "312",
+    "license": "PSF",
+    "files": [
+      "third_party_licenses\\pywin32\\adodbapi__license.txt",
+      "third_party_licenses\\pywin32\\pythonwin__License.txt",
+      "third_party_licenses\\pywin32\\pythonwin__pywin__idle__LICENSE.txt",
+      "third_party_licenses\\pywin32\\pywin32-312.dist-info__licenses__adodbapi__license.txt",
+      "third_party_licenses\\pywin32\\pywin32-312.dist-info__licenses__com__License.txt",
+      "third_party_licenses\\pywin32\\pywin32-312.dist-info__licenses__com__win32comext__mapi__src__MAPIStubLibrary__LICENSE",
+      "third_party_licenses\\pywin32\\pywin32-312.dist-info__licenses__pythonwin__License.txt",
+      "third_party_licenses\\pywin32\\pywin32-312.dist-info__licenses__pythonwin__Scintilla__License.txt",
+      "third_party_licenses\\pywin32\\pywin32-312.dist-info__licenses__pythonwin__pywin__idle__LICENSE.txt",
+      "third_party_licenses\\pywin32\\pywin32-312.dist-info__licenses__win32__License.txt",
+      "third_party_licenses\\pywin32\\win32__License.txt",
+      "third_party_licenses\\pywin32\\win32com__License.txt",
+      "third_party_licenses\\pywin32\\win32comext__License.txt",
+      "third_party_licenses\\pywin32\\win32comext__mapi__NOTICE.md"
+    ]
+  },
+  {
+    "name": "SoundCard",
+    "version": "0.4.6",
+    "license": "BSD 3-clause",
+    "files": [
+      "third_party_licenses\\soundcard\\soundcard-0.4.6.dist-info__licenses__LICENSE"
+    ]
+  },
+  {
+    "name": "cffi",
+    "version": "2.1.1",
+    "license": "MIT-0",
+    "files": [
+      "third_party_licenses\\cffi\\cffi-2.1.1.dist-info__licenses__LICENSE"
+    ]
+  },
+  {
+    "name": "pycparser",
+    "version": "3.0",
+    "license": "BSD-3-Clause",
+    "files": [
+      "third_party_licenses\\pycparser\\pycparser-3.0.dist-info__licenses__LICENSE"
+    ]
+  },
+  {
+    "name": "numpy",
+    "version": "2.5.1",
+    "license": "BSD-3-Clause AND 0BSD AND MIT AND Zlib AND CC0-1.0",
+    "files": [
+      "third_party_licenses\\numpy\\numpy-2.5.1.dist-info__licenses__LICENSE.txt",
+      "third_party_licenses\\numpy\\numpy-2.5.1.dist-info__licenses__numpy___core__include__numpy__libdivide__LICENSE.txt",
+      "third_party_licenses\\numpy\\numpy-2.5.1.dist-info__licenses__numpy___core__src__common__pythoncapi-compat__COPYING",
+      "third_party_licenses\\numpy\\numpy-2.5.1.dist-info__licenses__numpy___core__src__highway__LICENSE",
+      "third_party_licenses\\numpy\\numpy-2.5.1.dist-info__licenses__numpy___core__src__npysort__x86-simd-sort__LICENSE.md",
+      "third_party_licenses\\numpy\\numpy-2.5.1.dist-info__licenses__numpy___core__src__umath__svml__LICENSE",
+      "third_party_licenses\\numpy\\numpy-2.5.1.dist-info__licenses__numpy__fft__pocketfft__LICENSE.md",
+      "third_party_licenses\\numpy\\numpy-2.5.1.dist-info__licenses__numpy__linalg__lapack_lite__LICENSE.txt",
+      "third_party_licenses\\numpy\\numpy-2.5.1.dist-info__licenses__numpy__ma__LICENSE",
+      "third_party_licenses\\numpy\\numpy-2.5.1.dist-info__licenses__numpy__random__LICENSE.md",
+      "third_party_licenses\\numpy\\numpy-2.5.1.dist-info__licenses__numpy__random__src__distributions__LICENSE.md",
+      "third_party_licenses\\numpy\\numpy-2.5.1.dist-info__licenses__numpy__random__src__mt19937__LICENSE.md",
+      "third_party_licenses\\numpy\\numpy-2.5.1.dist-info__licenses__numpy__random__src__pcg64__LICENSE.md",
+      "third_party_licenses\\numpy\\numpy-2.5.1.dist-info__licenses__numpy__random__src__philox__LICENSE.md",
+      "third_party_licenses\\numpy\\numpy-2.5.1.dist-info__licenses__numpy__random__src__sfc64__LICENSE.md",
+      "third_party_licenses\\numpy\\numpy-2.5.1.dist-info__licenses__numpy__random__src__splitmix64__LICENSE.md",
+      "third_party_licenses\\numpy\\numpy___core__include__numpy__random__LICENSE.txt",
+      "third_party_licenses\\numpy\\numpy__ma__LICENSE",
+      "third_party_licenses\\numpy\\numpy__random__LICENSE.md"
+    ]
+  },
+  {
+    "name": "pystray",
+    "version": "0.19.5",
+    "license": "LGPLv3",
+    "files": [
+      "third_party_licenses\\pystray\\pystray-0.19.5.dist-info__COPYING",
+      "third_party_licenses\\pystray\\pystray-0.19.5.dist-info__COPYING.LGPL"
+    ]
+  },
+  {
+    "name": "six",
+    "version": "1.17.0",
+    "license": "MIT",
+    "files": [
+      "third_party_licenses\\six\\six-1.17.0.dist-info__LICENSE"
+    ]
+  },
+  {
+    "name": "pillow",
+    "version": "12.3.0",
+    "license": "MIT-CMU",
+    "files": [
+      "third_party_licenses\\pillow\\pillow-12.3.0.dist-info__licenses__LICENSE"
+    ]
+  },
+  {
+    "name": "pyserial",
+    "version": "3.5",
+    "license": "BSD",
+    "files": []
+  },
+  {
+    "name": "psutil",
+    "version": "7.2.2",
+    "license": "BSD-3-Clause",
+    "files": [
+      "third_party_licenses\\psutil\\psutil-7.2.2.dist-info__LICENSE"
+    ]
+  },
+  {
+    "name": "mss",
+    "version": "10.2.0",
+    "license": "MIT License\nCopyright (c) 2013-2026, Micka\u00ebl 'Tiger-222' Schoentgen\n\nPermission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the \"Software\"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:\n\nThe above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.",
+    "files": [
+      "third_party_licenses\\mss\\mss-10.2.0.dist-info__licenses__LICENSE.txt"
+    ]
+  },
+  {
+    "name": "keyboard",
+    "version": "0.13.5",
+    "license": "MIT",
+    "files": [
+      "third_party_licenses\\keyboard\\keyboard-0.13.5.dist-info__LICENSE.txt"
+    ]
+  },
+  {
+    "name": "hidapi",
+    "version": "0.15.0",
+    "license": "",
+    "files": [
+      "third_party_licenses\\hidapi\\hidapi-0.15.0.dist-info__licenses__LICENSE-bsd.txt",
+      "third_party_licenses\\hidapi\\hidapi-0.15.0.dist-info__licenses__LICENSE-gpl3.txt",
+      "third_party_licenses\\hidapi\\hidapi-0.15.0.dist-info__licenses__LICENSE-orig.txt",
+      "third_party_licenses\\hidapi\\hidapi-0.15.0.dist-info__licenses__LICENSE.txt"
+    ]
+  },
+  {
+    "name": "customtkinter",
+    "version": "6.0.0",
+    "license": "Creative Commons Zero v1.0 Universal",
+    "files": [
+      "third_party_licenses\\customtkinter\\customtkinter-6.0.0.dist-info__licenses__LICENSE"
+    ]
+  },
+  {
+    "name": "darkdetect",
+    "version": "0.8.0",
+    "license": "BSD-3-Clause",
+    "files": [
+      "third_party_licenses\\darkdetect\\darkdetect-0.8.0.dist-info__LICENSE"
+    ]
+  }
+]
