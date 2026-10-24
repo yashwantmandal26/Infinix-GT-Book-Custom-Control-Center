@@ -67,5 +67,5 @@ exe = EXE(
     entitlements_file=None,
     icon=['infinix_gt_icon.ico'],
     version='version_info.txt',
-    uac_admin=True,
+    uac_admin=False,
 )

@@ -51,6 +51,7 @@ import colorsys
 import re
 import subprocess
 import threading
+import socket
 import mss
 import keyboard
 import wmi
@@ -2535,6 +2536,10 @@ class PowerEventListener:
 
         try:
             self.restore_msg = win32gui.RegisterWindowMessage("InfinixGTToolkit_RestoreWindow")
+            try:
+                ctypes.windll.user32.ChangeWindowMessageFilter(self.restore_msg, 1)
+            except Exception:
+                pass
         except Exception:
             self.restore_msg = 0
 
@@ -2605,26 +2610,42 @@ class InfinixGTToolkitApp:
     HardwareEngine = HardwareEngine
 
     def __init__(self):
-        # Enforce single-instance mutex and restore existing window if already running
+        # Enforce single-instance mutex and initialize loopback IPC server
         self._mutex = None
+        self._ipc_server = None
+        IPC_PORT = 49392
         WINDOW_TITLE = "Infinix GT Toolkit"
+        MUTEX_NAME = "Local\\InfinixGTToolkit_SingleInstance_Mutex_v4"
         try:
-            MUTEX_NAME = "Local\\InfinixGTToolkit_SingleInstance_Mutex_v4"
             self._mutex = ctypes.windll.kernel32.CreateMutexW(None, False, MUTEX_NAME)
             if ctypes.windll.kernel32.GetLastError() == 183:  # ERROR_ALREADY_EXISTS
                 # Signal running instance to unhide and restore its window even if minimized to tray
-                restore_msg = ctypes.windll.user32.RegisterWindowMessageW("InfinixGTToolkit_RestoreWindow")
-                if restore_msg:
-                    ctypes.windll.user32.PostMessageW(0xFFFF, restore_msg, 0, 0)
-                hwnd = ctypes.windll.user32.FindWindowW(None, WINDOW_TITLE)
-                if hwnd:
-                    ctypes.windll.user32.ShowWindow(hwnd, 9)  # SW_RESTORE
-                    ctypes.windll.user32.SetForegroundWindow(hwnd)
+                if not any(arg in sys.argv for arg in ("--minimized", "--bg", "-m", "--tray", "--silent")):
+                    try:
+                        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                        s.settimeout(1.0)
+                        s.connect(("127.0.0.1", IPC_PORT))
+                        s.sendall(b"RESTORE\n")
+                        s.close()
+                    except Exception:
+                        pass
+                    try:
+                        restore_msg = ctypes.windll.user32.RegisterWindowMessageW("InfinixGTToolkit_RestoreWindow")
+                        if restore_msg:
+                            ctypes.windll.user32.PostMessageW(0xFFFF, restore_msg, 0, 0)
+                        hwnd = ctypes.windll.user32.FindWindowW(None, WINDOW_TITLE)
+                        if hwnd:
+                            ctypes.windll.user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+                            ctypes.windll.user32.SetForegroundWindow(hwnd)
+                    except Exception:
+                        pass
                 sys.exit(0)
         except SystemExit:
             raise
         except Exception:
             pass
+
+        self._start_ipc_server()
 
         # Check command-line flags for background autostart
         self.is_minimized = any(arg in sys.argv for arg in ("--minimized", "--bg", "-m", "--tray", "--silent"))
@@ -2856,6 +2877,8 @@ class InfinixGTToolkitApp:
         if getattr(self, 'is_minimized', False):
             self.root.withdraw()
             self.root.update_idletasks()
+        else:
+            self._do_show_window()
 
     def _start_startup_sync(self):
         """Task Scheduler maintenance must not freeze the first interactive window."""
@@ -8754,6 +8777,41 @@ class InfinixGTToolkitApp:
     def _show_window(self):
         self._ui_dispatch(self._do_show_window)
 
+    def _start_ipc_server(self):
+        """Background listener accepting restore requests from secondary instances."""
+        IPC_PORT = 49392
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            sock.bind(("127.0.0.1", IPC_PORT))
+            sock.listen(5)
+            self._ipc_server = sock
+        except Exception:
+            self._ipc_server = None
+            return
+
+        def listener():
+            while getattr(self, 'running', True) and self._ipc_server:
+                try:
+                    conn, _ = self._ipc_server.accept()
+                    data = conn.recv(64)
+                    if b"RESTORE" in data:
+                        self._request_show_window()
+                    conn.close()
+                except Exception:
+                    break
+        threading.Thread(target=listener, name="SingleInstanceIpcListener", daemon=True).start()
+
+    def _request_show_window(self):
+        """Thread-safe request to bring the window to the front."""
+        try:
+            if hasattr(self, 'root') and self.root and self.root.winfo_exists():
+                self.root.after(0, self._do_show_window)
+            else:
+                self._ui_dispatch(self._do_show_window)
+        except Exception:
+            self._ui_dispatch(self._do_show_window)
+
     def _do_show_window(self):
         self.root.deiconify()
         self.root.state("normal")
@@ -8825,6 +8883,18 @@ class InfinixGTToolkitApp:
             self.tray_icon.stop()
         except Exception:
             pass
+        if getattr(self, '_ipc_server', None):
+            try:
+                self._ipc_server.close()
+            except Exception:
+                pass
+            self._ipc_server = None
+        if getattr(self, '_mutex', None):
+            try:
+                ctypes.windll.kernel32.CloseHandle(self._mutex)
+            except Exception:
+                pass
+            self._mutex = None
         try:
             HardwareEngine._close_device()
         except Exception:
@@ -8908,6 +8978,42 @@ def is_admin() -> bool:
         return False
 
 
+def check_and_notify_running_instance() -> bool:
+    """Check if another instance is already running. If so, signal it to restore its dashboard and return True."""
+    IPC_PORT = 49392
+    WINDOW_TITLE = "Infinix GT Toolkit"
+
+    # 1. Attempt connection to primary instance via localhost socket
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(1.0)
+        s.connect(("127.0.0.1", IPC_PORT))
+        s.sendall(b"RESTORE\n")
+        s.close()
+        return True
+    except Exception:
+        pass
+
+    # 2. Mutex check fallback
+    try:
+        MUTEX_NAME = "Local\\InfinixGTToolkit_SingleInstance_Mutex_v4"
+        test_mutex = ctypes.windll.kernel32.OpenMutexW(0x00100000, False, MUTEX_NAME)  # SYNCHRONIZE
+        if test_mutex:
+            ctypes.windll.kernel32.CloseHandle(test_mutex)
+            restore_msg = ctypes.windll.user32.RegisterWindowMessageW("InfinixGTToolkit_RestoreWindow")
+            if restore_msg:
+                ctypes.windll.user32.PostMessageW(0xFFFF, restore_msg, 0, 0)
+            hwnd = ctypes.windll.user32.FindWindowW(None, WINDOW_TITLE)
+            if hwnd:
+                ctypes.windll.user32.ShowWindow(hwnd, 9)
+                ctypes.windll.user32.SetForegroundWindow(hwnd)
+            return True
+    except Exception:
+        pass
+
+    return False
+
+
 def request_admin_elevation():
     if not is_admin():
         try:
@@ -8931,6 +9037,22 @@ def request_admin_elevation():
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
     try:
+        # Check command-line flags for background autostart
+        is_bg_launch = any(arg in sys.argv for arg in ("--minimized", "--bg", "-m", "--tray", "--silent"))
+
+        if is_bg_launch:
+            try:
+                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                s.settimeout(0.5)
+                s.connect(("127.0.0.1", 49392))
+                s.close()
+                sys.exit(0)
+            except Exception:
+                pass
+        else:
+            if check_and_notify_running_instance():
+                sys.exit(0)
+
         request_admin_elevation()
         app = InfinixGTToolkitApp()
         app.root.mainloop()
