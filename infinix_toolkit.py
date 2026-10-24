@@ -851,6 +851,7 @@ DEFAULT_CONFIG = {
     "close_to_tray": True,
     "preset_include_power": False,
     "ai_governor": True,
+    "mode_osd_enabled": True,
     "ai_circadian": False,
     "ai_game_detector": True,
     "bz_mode": 1,
@@ -2329,6 +2330,10 @@ class HardwareModeListener:
             except Exception:
                 pass
 
+    def sync_mode(self, mode: str):
+        """Keep listener in sync with app-initiated mode changes to prevent echo triggers."""
+        self.last_ec_mode = mode
+
     def _ec_poll_worker(self):
         try:
             import pythoncom
@@ -2352,9 +2357,13 @@ class HardwareModeListener:
                     if self.last_ec_mode is None:
                         self.last_ec_mode = mode
                     elif mode != self.last_ec_mode:
-                        self.last_ec_mode = mode
-                        if self.callback:
-                            self.callback(mode, "hardware_ec")
+                        # Debounce verification read (50ms) to ignore transient EC bus transitions
+                        time.sleep(0.05)
+                        confirm_mode = HardwareEngine.get_performance_mode()
+                        if confirm_mode == mode:
+                            self.last_ec_mode = mode
+                            if self.callback:
+                                self.callback(mode, "hardware_ec")
             except Exception:
                 pass
 
@@ -2380,20 +2389,23 @@ class HardwareModeListener:
             if nCode >= 0 and self._running and wParam in (WM_KEYDOWN, WM_SYSKEYDOWN):
                 try:
                     kb = ctypes.cast(lParam, ctypes.POINTER(KBDLLHOOKSTRUCT))[0]
-                    vk = kb.vkCode
-                    target_mode = None
-                    # F15 / F18 / F21 -> Quiet
-                    if vk in (0x7E, 0x81, 0x84):
-                        target_mode = "Quiet"
-                    # F16 / F19 / F22 -> Balanced
-                    elif vk in (0x7F, 0x82, 0x85):
-                        target_mode = "Balanced"
-                    # F17 / F20 / F23 -> Beast
-                    elif vk in (0x80, 0x83, 0x86):
-                        target_mode = "Beast"
+                    # Discard synthetic injected keystrokes from background tools to prevent ghost triggers
+                    LLKHF_INJECTED = 0x00000010
+                    if not (kb.flags & LLKHF_INJECTED):
+                        vk = kb.vkCode
+                        target_mode = None
+                        # F15 / F18 / F21 -> Quiet
+                        if vk in (0x7E, 0x81, 0x84):
+                            target_mode = "Quiet"
+                        # F16 / F19 / F22 -> Balanced
+                        elif vk in (0x7F, 0x82, 0x85):
+                            target_mode = "Balanced"
+                        # F17 / F20 / F23 -> Beast
+                        elif vk in (0x80, 0x83, 0x86):
+                            target_mode = "Beast"
 
-                    if target_mode and self.callback:
-                        self.callback(target_mode, "keyboard_hotkey")
+                        if target_mode and self.callback:
+                            self.callback(target_mode, "keyboard_hotkey")
                 except Exception:
                     pass
             return user32.CallNextHookEx(self._hook, nCode, wParam, lParam)
@@ -3024,6 +3036,16 @@ class InfinixGTToolkitApp:
         if mode not in ("Quiet", "Balanced", "Beast"):
             return
 
+        current_mode = self.config.get("power_mode", "Balanced")
+        if mode == current_mode:
+            return
+
+        if hasattr(self, "hardware_mode_listener") and self.hardware_mode_listener:
+            try:
+                self.hardware_mode_listener.sync_mode(mode)
+            except Exception:
+                pass
+
         display_mode = "Gaming" if mode == "Beast" else mode
         self.config["power_mode"] = mode
         if hasattr(self, "mode_var"):
@@ -3063,6 +3085,8 @@ class InfinixGTToolkitApp:
 
     def _show_mode_osd(self, mode: str):
         """Displays the Windows mini notification / OSD popup on screen."""
+        if not self.config.get("mode_osd_enabled", True):
+            return
         osd = getattr(self, "mode_osd", None)
         if osd is not None:
             try:
@@ -7010,7 +7034,13 @@ class InfinixGTToolkitApp:
                 self._record_automation_event(f"Manual control for {minutes} min", mode)
             self._save_config()
             self._set_mode_apply_status(f"●  {display_mode} mode active", THEME["accent_green"])
-            if hasattr(self, "_show_mode_osd"):
+            if hasattr(self, "hardware_mode_listener") and self.hardware_mode_listener:
+                try:
+                    self.hardware_mode_listener.sync_mode(mode)
+                except Exception:
+                    pass
+            # Only display OSD popup for deliberate manual changes; automatic background changes must be silent!
+            if not automatic and hasattr(self, "_show_mode_osd"):
                 self._show_mode_osd(mode)
             try:
                 HardwareEngine.set_windows_power_plan(mode)

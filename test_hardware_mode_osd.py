@@ -218,5 +218,48 @@ class TestAppModeIntegration(unittest.TestCase):
         app.mode_osd.show.assert_called_once_with("Balanced")
 
 
+    def test_finish_performance_mode_automatic_does_not_trigger_osd(self):
+        """Verify _finish_performance_mode suppresses OSD for background automatic changes."""
+        app = SimpleNamespace(
+            config={"power_mode": "Beast"},
+            mode_var=SimpleNamespace(get=lambda: "Balanced", set=MagicMock()),
+            mode_display_var=SimpleNamespace(set=MagicMock()),
+            mode_selector=SimpleNamespace(configure=MagicMock()),
+            mode_osd=SimpleNamespace(show=MagicMock()),
+            _set_mode_apply_status=MagicMock(),
+            _set_hardware_status=MagicMock(),
+            _update_telemetry_mode_buttons=MagicMock(),
+            _save_config=MagicMock(),
+            _protect_manual_mode=MagicMock(return_value=30),
+            _record_automation_event=MagicMock(),
+            _show_mode_osd=lambda mode: app.mode_osd.show(mode),
+        )
+
+        result = SimpleNamespace(ok=True, error="")
+        toolkit.InfinixGTToolkitApp._finish_performance_mode(
+            app, result, "Balanced", "Beast", "Idle -> Scaled to Balanced", True
+        )
+
+        self.assertEqual(app.config["power_mode"], "Balanced")
+        app.mode_osd.show.assert_not_called()
+
+    def test_apply_hardware_mode_change_ignores_same_mode(self):
+        """Verify _apply_hardware_mode_change ignores triggers for already active mode."""
+        app = SimpleNamespace(
+            config={"power_mode": "Balanced"},
+            mode_var=SimpleNamespace(set=MagicMock()),
+            mode_display_var=SimpleNamespace(set=MagicMock()),
+            mode_selector=SimpleNamespace(set=MagicMock()),
+            mode_osd=SimpleNamespace(show=MagicMock()),
+            _set_mode_apply_status=MagicMock(),
+            _update_telemetry_mode_buttons=MagicMock(),
+            _save_config=MagicMock(),
+            _show_mode_osd=lambda mode: app.mode_osd.show(mode),
+        )
+
+        toolkit.InfinixGTToolkitApp._apply_hardware_mode_change(app, "Balanced", "hardware_ec")
+        app.mode_osd.show.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()
