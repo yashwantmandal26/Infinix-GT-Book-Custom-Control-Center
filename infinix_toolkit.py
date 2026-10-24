@@ -65,7 +65,7 @@ import customtkinter as ctk
 import neon_ui
 import tkinter as tk
 from tkinter import colorchooser, messagebox
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageTk
 import pystray
 import backzone_ui
 import studio_ui
@@ -971,21 +971,15 @@ class SoftwareFnLock:
         try:
             import pythoncom
             pythoncom.CoInitialize()
-            try:
-                w = wmi.WMI(namespace='wmi')
-                monitors = w.WmiMonitorBrightness()
-                if not monitors:
-                    return
-                cur = monitors[0].CurrentBrightness
-                new_b = max(0, min(100, cur + step))
-                methods = w.WmiMonitorBrightnessMethods()
-                if methods:
-                    methods[0].WmiSetBrightness(Timeout=0, Brightness=new_b)
-            finally:
-                try:
-                    pythoncom.CoUninitialize()
-                except Exception:
-                    pass
+            w = wmi.WMI(namespace='wmi')
+            monitors = w.WmiMonitorBrightness()
+            if not monitors:
+                return
+            cur = monitors[0].CurrentBrightness
+            new_b = max(0, min(100, cur + step))
+            methods = w.WmiMonitorBrightnessMethods()
+            if methods:
+                methods[0].WmiSetBrightness(Timeout=0, Brightness=new_b)
         except Exception:
             pass
 
@@ -1255,9 +1249,7 @@ class HardwareEngine:
         return cls._last_error
 
     _acpi_lock = threading.RLock()
-    _acpi_cache = None
-    _acpi_locator = None
-    _acpi_services = None
+    _tls = threading.local()
 
     ALLOWED_EC_RAM_ADDRESSES = {0x08, 0x09, 0x40, 0x41, 0x4C, 0x4D, 0x4E, 0x5E, 0x69, 0x6A, 0xC0}
 
@@ -1270,29 +1262,23 @@ class HardwareEngine:
         except Exception:
             pass
 
-        with cls._acpi_lock:
-            if cls._acpi_cache is not None:
-                try:
-                    _ = cls._acpi_cache.Methods_("MemIO")
-                    return cls._acpi_cache
-                except Exception:
-                    cls._acpi_cache = None
-                    cls._acpi_services = None
-                    cls._acpi_locator = None
+        cached = getattr(cls._tls, 'acpi_obj', None)
+        if cached is not None:
+            return cached
 
-            locator = win32com.client.Dispatch("WbemScripting.SWbemLocator")
-            locator.Security_.ImpersonationLevel = 3
-            try:
-                locator.Security_.Privileges.AddAsString("SeSecurityPrivilege", True)
-            except Exception:
-                pass
-            services = locator.ConnectServer(".", "root\\wmi")
-            for obj in services.ExecQuery("SELECT * FROM ACPIMethod"):
-                cls._acpi_locator = locator
-                cls._acpi_services = services
-                cls._acpi_cache = obj
-                return obj
-            raise RuntimeError("OEM ACPIMethod WMI provider is unavailable")
+        locator = win32com.client.Dispatch("WbemScripting.SWbemLocator")
+        locator.Security_.ImpersonationLevel = 3
+        try:
+            locator.Security_.Privileges.AddAsString("SeSecurityPrivilege", True)
+        except Exception:
+            pass
+        services = locator.ConnectServer(".", "root\\wmi")
+        for obj in services.ExecQuery("SELECT * FROM ACPIMethod"):
+            cls._tls.locator = locator
+            cls._tls.services = services
+            cls._tls.acpi_obj = obj
+            return obj
+        raise RuntimeError("OEM ACPIMethod WMI provider is unavailable")
 
     @classmethod
     def _exec_acpi_buffer(cls, acpi_obj, method_name: str, buf):
@@ -1300,19 +1286,15 @@ class HardwareEngine:
             last_exc = None
             for attempt in range(3):
                 try:
-                    target_obj = acpi_obj if cls._acpi_cache is None else cls._acpi_cache
+                    target_obj = cls._get_acpi_method_provider()
                     in_params = target_obj.Methods_(method_name).InParameters.SpawnInstance_()
                     in_params.Properties_("IData").Value = list(buf)
                     return target_obj.ExecMethod_(method_name, in_params)
                 except Exception as exc:
                     last_exc = exc
+                    cls._tls.acpi_obj = None
                     if attempt < 2:
                         time.sleep(0.04)
-                        try:
-                            cls._acpi_cache = None
-                            acpi_obj = cls._get_acpi_method_provider()
-                        except Exception:
-                            pass
                     else:
                         raise last_exc
 
@@ -1968,12 +1950,9 @@ class HardwareEngine:
         try:
             import pythoncom
             pythoncom.CoInitialize()
-            try:
-                monitors = wmi.WMI(namespace="wmi").WmiMonitorBrightness()
-                if monitors:
-                    return max(0, min(100, int(monitors[0].CurrentBrightness)))
-            finally:
-                pythoncom.CoUninitialize()
+            monitors = wmi.WMI(namespace="wmi").WmiMonitorBrightness()
+            if monitors:
+                return max(0, min(100, int(monitors[0].CurrentBrightness)))
         except Exception:
             pass
         return None
@@ -1984,15 +1963,12 @@ class HardwareEngine:
         try:
             import pythoncom
             pythoncom.CoInitialize()
-            try:
-                methods = wmi.WMI(namespace="wmi").WmiMonitorBrightnessMethods()
-                if not methods:
-                    return False
-                methods[0].WmiSetBrightness(
-                    Timeout=0, Brightness=max(0, min(100, int(brightness))))
-                return True
-            finally:
-                pythoncom.CoUninitialize()
+            methods = wmi.WMI(namespace="wmi").WmiMonitorBrightnessMethods()
+            if not methods:
+                return False
+            methods[0].WmiSetBrightness(
+                Timeout=0, Brightness=max(0, min(100, int(brightness))))
+            return True
         except Exception:
             return False
 
@@ -2333,36 +2309,10 @@ class HardwareModeListener:
         self._poll_thread.start()
         self._hook_thread = threading.Thread(target=self._keyboard_hook_worker, name="ModeKeyHook", daemon=True)
         self._hook_thread.start()
-        self._wmi_thread = threading.Thread(target=self._wmi_acpi_worker, name="WmiAcpiWatcher", daemon=True)
-        self._wmi_thread.start()
+        # WMI ACPI watcher removed to prevent pythoncom cross-thread COM sink crash
 
     def _wmi_acpi_worker(self):
-        try:
-            import pythoncom
-            pythoncom.CoInitialize()
-            import wmi
-            c = wmi.WMI(namespace="root/wmi")
-            watcher = c.watch_for(notification_type="Creation", wmi_class="Acpi_Event", delay_secs=1)
-            while self._running:
-                try:
-                    event = watcher(timeout_ms=1000)
-                    if event and self._running:
-                        time.sleep(0.08)
-                        mode = HardwareEngine.get_performance_mode()
-                        if mode and self.callback:
-                            self.last_ec_mode = mode
-                            self.callback(mode, "acpi_event")
-                except wmi.x_wmi_timed_out:
-                    continue
-                except Exception:
-                    time.sleep(1.0)
-        except Exception:
-            pass
-        finally:
-            try:
-                pythoncom.CoUninitialize()
-            except Exception:
-                pass
+        pass
 
     def stop(self):
         self._running = False
@@ -2379,6 +2329,11 @@ class HardwareModeListener:
                 pass
 
     def _ec_poll_worker(self):
+        try:
+            import pythoncom
+            pythoncom.CoInitialize()
+        except Exception:
+            pass
         try:
             mode = HardwareEngine.get_performance_mode()
             if mode:
@@ -7149,6 +7104,12 @@ class InfinixGTToolkitApp:
 
     def _on_cooler_boost_toggled(self):
         val = self.cooler_var.get()
+        if val:
+            if hasattr(self, "_apply_fan_preset"):
+                self._apply_fan_preset(100)
+        else:
+            if hasattr(self, "_on_fan_mode_selected"):
+                self._on_fan_mode_selected("Auto (Dynamic EC Curve)")
         self.fan_control_mode = "manual" if val else "auto"
         self.config["fan_control_mode"] = self.fan_control_mode
         if hasattr(self, "fan_mode_var"):
@@ -7166,10 +7127,11 @@ class InfinixGTToolkitApp:
             self.cooler_switch.configure(state="disabled")
         accepted = InfinixGTToolkitApp._submit_hardware_command(self,
             "cooler-boost",
-            lambda: HardwareEngine.set_full_fan_mode(val, self.mode_var.get()),
+            lambda: HardwareEngine.set_full_fan_mode(val, self.mode_var.get() if hasattr(self, 'mode_var') else 'Balanced'),
             lambda result: self._finish_cooler_boost(result, val))
         if not accepted:
-            self.cooler_var.set(not val)
+            if hasattr(self, 'cooler_var') and hasattr(self.cooler_var, 'set'):
+                self.cooler_var.set(not val)
             if hasattr(self, "cooler_switch"):
                 self.cooler_switch.configure(state="normal")
 
@@ -7181,7 +7143,8 @@ class InfinixGTToolkitApp:
             self._save_config()
             self._set_hardware_status(True, "Extreme Cooler Boost")
         else:
-            self.cooler_var.set(not val)
+            if hasattr(self, 'cooler_var') and hasattr(self.cooler_var, 'set'):
+                self.cooler_var.set(not val)
             self._set_hardware_status(
                 False, "Extreme Cooler Boost", result.error, show_dialog=True,
                 retry=lambda: self._retry_cooler_boost(val))
@@ -8525,6 +8488,11 @@ class InfinixGTToolkitApp:
                 g_text = f"\U0001f3ae GPU Fan: {g_val:,} RPM" if g_val else "\U0001f3ae GPU Fan: Dynamic"
                 self.gpu_fan_rpm_chip.configure(text=g_text)
 
+            if hasattr(self, "telemetry_fan_speed_pill") and self.telemetry_fan_speed_pill.winfo_exists():
+                f_val = getattr(self, "fan_rpm_val", None)
+                f_text = f"\U0001f32a\ufe0f Fan: {f_val:,} RPM" if f_val else "\U0001f32a\ufe0f Fan: Dynamic"
+                self.telemetry_fan_speed_pill.configure(text=f_text)
+
             # Mini HUD Floating Widget Update
             if getattr(self, 'hud_window', None) is not None and self.hud_window.winfo_exists():
                 if hasattr(self, 'hud_cpu_lbl'):
@@ -8962,7 +8930,22 @@ def request_admin_elevation():
 # Application Entry Point
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
-    request_admin_elevation()
-    app = InfinixGTToolkitApp()
-    app.root.mainloop()
+    try:
+        request_admin_elevation()
+        app = InfinixGTToolkitApp()
+        app.root.mainloop()
+    except Exception as exc:
+        import traceback
+        from datetime import datetime
+        try:
+            with open(CRASH_LOG_FILE, 'a', encoding='utf-8') as f:
+                f.write(f'\n[{datetime.now().strftime("%Y-%m-%d %H:%M:%S")}] [Startup Crash]\n')
+                traceback.print_exc(file=f)
+        except Exception:
+            pass
+        try:
+            ctypes.windll.user32.MessageBoxW(0, f"Infinix GT Toolkit encountered an error starting up:\n\n{exc}\n\nPlease see crash.log for details.", "Infinix GT Toolkit Error", 0x10)
+        except Exception:
+            pass
+        sys.exit(1)
 
