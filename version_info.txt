@@ -1,7 +1,7 @@
 VSVersionInfo(
   ffi=FixedFileInfo(
-    filevers=(4, 5, 2, 0),
-    prodvers=(4, 5, 2, 0),
+    filevers=(4, 5, 7, 0),
+    prodvers=(4, 5, 7, 0),
     mask=0x3f,
     flags=0x0,
     OS=0x40004,
@@ -13,14 +13,14 @@ VSVersionInfo(
     StringFileInfo([
       StringTable(
         '040904B0',
-        [StringStruct('CompanyName', 'Yashman'),
+        [StringStruct('CompanyName', 'Yashwant Mandal'),
          StringStruct('FileDescription', 'Infinix GT Toolkit Control Center'),
-         StringStruct('FileVersion', '4.5.2.0'),
+         StringStruct('FileVersion', '4.5.7.0'),
          StringStruct('InternalName', 'InfinixGTToolkit'),
-         StringStruct('LegalCopyright', 'Copyright 2026 Yashman'),
+         StringStruct('LegalCopyright', 'Copyright 2026 Yashwant Mandal'),
          StringStruct('OriginalFilename', 'InfinixGTToolkit.exe'),
          StringStruct('ProductName', 'Infinix GT Toolkit'),
-         StringStruct('ProductVersion', '4.5.2 Stable')])
+         StringStruct('ProductVersion', '4.5.7 Stable')])
     ]),
     VarFileInfo([VarStruct('Translation', [1033, 1200])])
   ]

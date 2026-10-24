@@ -1,5 +1,5 @@
 """
-Infinix GT Toolkit v4.5.2
+Infinix GT Toolkit
 =============================
 Commercial-grade, eye-pleasing hardware control suite & intelligent automation engine
 crafted specifically for the Infinix GT Book (Model GL613 / BYD N16 chassis).
@@ -11,7 +11,7 @@ Key Highlights:
 - 🌅 AI Circadian Auto-Lighting (24-Hour natural light temperature adaptation)
 - 🎮 AI Game & Studio Auto-Detector (Auto-activates Beast & Win-Lock on game launch)
 - 🎛️ Precision RGB Matrix: 4-Zone Interactive Map, R/G/B Sliders (0-255) & Hex Input
-- 💾 Custom User Preset Library (Save, Name, and Load custom layouts anytime)
+- 🎨 Coordinated Lighting Palettes with Undo/Redo
 - ⚡ Hardware Thermal Curves & 100% Extreme Cooler Boost
 - 📊 Real-Time Hardware Telemetry (CPU load, RAM GB/%, Battery infrastructure)
 - 🔌 OEM USB Sleep Charging & Smart Inactivity Dimmer
@@ -69,6 +69,7 @@ from PIL import Image, ImageDraw
 import pystray
 import backzone_ui
 import studio_ui
+import telemetry_data
 from app_runtime import ConfigWriter, UiMailbox, LightingHistory
 from hardware_runtime import HardwareCommandController, CommandResult, format_reliability_report
 from automation_policy import AutomationPolicy
@@ -112,9 +113,9 @@ CONFIG_FILE = os.path.join(CONFIG_DIR, "config_v4.json")
 CRASH_LOG_FILE = os.path.join(CONFIG_DIR, "crash.log")
 STARTUP_DIR = os.path.join(os.environ.get("APPDATA", ""), r"Microsoft\Windows\Start Menu\Programs\Startup")
 SHORTCUT_PATH = os.path.join(STARTUP_DIR, "InfinixGTToolkit.lnk")
-APP_VERSION = "4.5.2"
+APP_VERSION = "4.5.7"
 BUILD_CHANNEL = "Stable"
-BUILD_DATE = "2026-10-12"
+BUILD_DATE = "2026-10-13"
 UPDATE_REPOSITORY = "yashwantmandal26/Infinix-GT-Book-Custom-Control-Center"
 
 
@@ -1246,31 +1247,74 @@ class HardwareEngine:
     _needs_mode_restore = False
     _last_path = None
     _last_error = ""
+    _saved_pre_quiet_brightness: Optional[int] = None
+    _last_power_plan_mode: Optional[str] = None
 
     @classmethod
     def get_last_error(cls) -> str:
         return cls._last_error
 
-    @staticmethod
-    def _get_acpi_method_provider():
+    _acpi_lock = threading.RLock()
+    _acpi_cache = None
+    _acpi_locator = None
+    _acpi_services = None
+
+    ALLOWED_EC_RAM_ADDRESSES = {0x08, 0x09, 0x40, 0x41, 0x4C, 0x4D, 0x4E, 0x5E, 0x69, 0x6A, 0xC0}
+
+    @classmethod
+    def _get_acpi_method_provider(cls):
         import pythoncom
         import win32com.client
-        pythoncom.CoInitialize()
-        locator = win32com.client.Dispatch("WbemScripting.SWbemLocator")
         try:
-            locator.Security_.Privileges.AddAsString("SeSecurityPrivilege", True)
+            pythoncom.CoInitialize()
         except Exception:
             pass
-        services = locator.ConnectServer(".", "root\\wmi")
-        for obj in services.ExecQuery("SELECT * FROM ACPIMethod"):
-            return obj
-        raise RuntimeError("OEM ACPIMethod WMI provider is unavailable")
 
-    @staticmethod
-    def _exec_acpi_buffer(acpi_obj, method_name: str, buf):
-        in_params = acpi_obj.Methods_(method_name).InParameters.SpawnInstance_()
-        in_params.Properties_("IData").Value = list(buf)
-        return acpi_obj.ExecMethod_(method_name, in_params)
+        with cls._acpi_lock:
+            if cls._acpi_cache is not None:
+                try:
+                    _ = cls._acpi_cache.Methods_("MemIO")
+                    return cls._acpi_cache
+                except Exception:
+                    cls._acpi_cache = None
+                    cls._acpi_services = None
+                    cls._acpi_locator = None
+
+            locator = win32com.client.Dispatch("WbemScripting.SWbemLocator")
+            locator.Security_.ImpersonationLevel = 3
+            try:
+                locator.Security_.Privileges.AddAsString("SeSecurityPrivilege", True)
+            except Exception:
+                pass
+            services = locator.ConnectServer(".", "root\\wmi")
+            for obj in services.ExecQuery("SELECT * FROM ACPIMethod"):
+                cls._acpi_locator = locator
+                cls._acpi_services = services
+                cls._acpi_cache = obj
+                return obj
+            raise RuntimeError("OEM ACPIMethod WMI provider is unavailable")
+
+    @classmethod
+    def _exec_acpi_buffer(cls, acpi_obj, method_name: str, buf):
+        with cls._acpi_lock:
+            last_exc = None
+            for attempt in range(3):
+                try:
+                    target_obj = acpi_obj if cls._acpi_cache is None else cls._acpi_cache
+                    in_params = target_obj.Methods_(method_name).InParameters.SpawnInstance_()
+                    in_params.Properties_("IData").Value = list(buf)
+                    return target_obj.ExecMethod_(method_name, in_params)
+                except Exception as exc:
+                    last_exc = exc
+                    if attempt < 2:
+                        time.sleep(0.04)
+                        try:
+                            cls._acpi_cache = None
+                            acpi_obj = cls._get_acpi_method_provider()
+                        except Exception:
+                            pass
+                    else:
+                        raise last_exc
 
     @classmethod
     def _io_write(cls, acpi_obj, address: int, value: int):
@@ -1295,61 +1339,57 @@ class HardwareEngine:
         buf[15] = address & 0xFF
         out_params = cls._exec_acpi_buffer(acpi_obj, "MemIO", buf)
         odata = out_params.Properties_("OData").Value
-        # OEM providers may return a scalar register value or a full packet.
-        # Never substitute zero for malformed data before a read-modify-write.
         if isinstance(odata, int):
             return odata & 0xFF
         if isinstance(odata, (tuple, list, bytes, bytearray)) and len(odata) > 16:
             return int(odata[16]) & 0xFF
         raise RuntimeError(f"Unexpected MemIO response: {type(odata).__name__}")
 
-    ALLOWED_EC_RAM_ADDRESSES = {0x40, 0x41, 0x4C, 0x4D, 0x4E, 0x5E, 0xC0}
-
     @classmethod
     def _ec_write_ram(cls, acpi_obj, address: int, value: int):
-        # Strict device safety: reject any writes outside known safe OEM registers
         if address not in cls.ALLOWED_EC_RAM_ADDRESSES:
             cls._last_error = f"EC write blocked: address 0x{address:02X} is not whitelisted"
             return False
-        # Clamp value to valid 8-bit range
         val = max(0, min(255, int(value)))
-        # Exact sequence used by BYDWmi2.WmiServer.ECWriteRamCMD.
-        cls._io_write(acpi_obj, 148, 0)
-        cls._io_write(acpi_obj, 145, 0)
-        cls._io_write(acpi_obj, 146, 0)
-        cls._io_write(acpi_obj, 146, 1)
-        cls._io_write(acpi_obj, 144, 0)
-        cls._io_write(acpi_obj, 145, address)
-        cls._io_write(acpi_obj, 160, val)
-        cls._io_write(acpi_obj, 147, 161)
-        return True
+        with cls._acpi_lock:
+            cls._io_write(acpi_obj, 148, 0)
+            cls._io_write(acpi_obj, 145, 0)
+            cls._io_write(acpi_obj, 146, 0)
+            cls._io_write(acpi_obj, 146, 1)
+            cls._io_write(acpi_obj, 144, 0)
+            cls._io_write(acpi_obj, 145, address)
+            cls._io_write(acpi_obj, 160, val)
+            cls._io_write(acpi_obj, 147, 161)
+            time.sleep(0.003)
+            return True
 
     @classmethod
     def _ec_read_ram(cls, acpi_obj, address: int) -> int:
-        cls._io_write(acpi_obj, 148, 0)
-        cls._io_write(acpi_obj, 146, 1)
-        cls._io_write(acpi_obj, 144, 0)
-        cls._io_write(acpi_obj, 145, address)
-        cls._io_write(acpi_obj, 147, 160)
-        return cls._io_read(acpi_obj, 160)
+        with cls._acpi_lock:
+            cls._io_write(acpi_obj, 148, 0)
+            cls._io_write(acpi_obj, 146, 1)
+            cls._io_write(acpi_obj, 144, 0)
+            cls._io_write(acpi_obj, 145, address)
+            cls._io_write(acpi_obj, 147, 160)
+            return cls._io_read(acpi_obj, 160)
 
     @classmethod
     def _verify_ec_value(cls, acpi_obj, address: int, expected: int, mask: int = 0xFF) -> int:
         """Read a writable EC register back with a short firmware-settle window."""
-        actual = None
-        for attempt in range(3):
-            actual = cls._ec_read_ram(acpi_obj, address)
-            if actual & mask == expected & mask:
-                return actual
-            if attempt < 2:
-                time.sleep(0.04)
-        raise RuntimeError(
-            f"EC verification failed at 0x{address:02X}: "
-            f"expected 0x{expected & mask:02X}, read 0x{actual & mask:02X}")
+        with cls._acpi_lock:
+            actual = None
+            for attempt in range(3):
+                actual = cls._ec_read_ram(acpi_obj, address)
+                if actual is not None and (actual & mask == expected & mask):
+                    return actual
+                if attempt < 2:
+                    time.sleep(0.04)
+            raise RuntimeError(
+                f"EC verification failed at 0x{address:02X}: "
+                f"expected 0x{expected & mask:02X}, read 0x{actual & mask:02X}")
 
     @classmethod
     def _smi(cls, acpi_obj, command: int, operation: int, value):
-        # Exact 24-byte BYDWmi2.WmiServer.SMI layout.
         buf = [0] * 24
         buf[0:4] = [66, 89, 68, 76]
         buf[4:8] = [
@@ -1361,88 +1401,160 @@ class HardwareEngine:
         buf[12] = operation & 0xFF
         buf[13] = 0
         buf[16] = int(bool(value)) & 0xFF
-        return cls._exec_acpi_buffer(acpi_obj, "SMI", buf)
+        with cls._acpi_lock:
+            return cls._exec_acpi_buffer(acpi_obj, "SMI", buf)
 
     @classmethod
     def set_ec_backlight_power(cls, enable: bool = True):
-        """Controls hardware power to the Rear BackZone LED via EC RAM at address 94 (0x5E)."""
-        try:
-            acpi_obj = cls._get_acpi_method_provider()
-            cur_val = cls._ec_read_ram(acpi_obj, 94)
-            l1 = cur_val & 1
-            lps = cur_val & 128
-            new_val = (0 | l1 | lps) if enable else (2 | l1 | lps)
-            if new_val != cur_val and not cls._ec_write_ram(acpi_obj, 94, new_val):
+        with cls._acpi_lock:
+            try:
+                acpi_obj = cls._get_acpi_method_provider()
+                cur_val = cls._ec_read_ram(acpi_obj, 94)
+                l1 = cur_val & 1
+                lps = cur_val & 128
+                new_val = (0 | l1 | lps) if enable else (2 | l1 | lps)
+                if new_val != cur_val and not cls._ec_write_ram(acpi_obj, 94, new_val):
+                    return False
+                cls._last_error = ""
+                return True
+            except Exception as e:
+                cls._last_error = f"EC backlight power update failed: {e}"
                 return False
-            cls._last_error = ""
-            return True
-        except Exception as e:
-            cls._last_error = f"EC backlight power update failed: {e}"
-            return False
 
     @classmethod
     def set_performance_mode(cls, mode: str) -> bool:
         """Apply the OEM performance profile through EC RAM address 0x40."""
         values = {"Quiet": 0, "Balanced": 1, "Beast": 2}
-        try:
-            acpi_obj = cls._get_acpi_method_provider()
-            expected = values.get(mode, 1)
-            if not cls._ec_write_ram(acpi_obj, 0x40, expected):
+        with cls._acpi_lock:
+            try:
+                acpi_obj = cls._get_acpi_method_provider()
+                expected = values.get(mode, 1)
+                if not cls._ec_write_ram(acpi_obj, 0x40, expected):
+                    return False
+                cls._verify_ec_value(acpi_obj, 0x40, expected)
+                cls._last_error = ""
+                try:
+                    cls.set_windows_power_plan(mode)
+                except Exception:
+                    pass
+                return True
+            except Exception as e:
+                cls._last_error = f"Performance profile update failed: {e}"
                 return False
-            cls._verify_ec_value(acpi_obj, 0x40, expected)
-            cls._last_error = ""
-            return True
-        except Exception as e:
-            cls._last_error = f"Performance profile update failed: {e}"
-            return False
 
     @classmethod
     def get_performance_mode(cls) -> Optional[str]:
         """Read the active OEM thermal profile from its verified EC register."""
-        try:
-            value = cls._ec_read_ram(cls._get_acpi_method_provider(), 0x40)
-            mode = {0: "Quiet", 1: "Balanced", 2: "Beast"}.get(value)
-            if mode is None:
-                raise RuntimeError(f"unsupported performance value {value}")
-            cls._last_error = ""
-            return mode
-        except Exception as exc:
-            cls._last_error = f"Performance profile read failed: {exc}"
-            return None
+        with cls._acpi_lock:
+            try:
+                value = cls._ec_read_ram(cls._get_acpi_method_provider(), 0x40)
+                mode = {0: "Quiet", 1: "Balanced", 2: "Beast", 3: "Beast"}.get(value)
+                if mode is None:
+                    raise RuntimeError(f"unsupported performance value {value}")
+                cls._last_error = ""
+                return mode
+            except Exception as exc:
+                cls._last_error = f"Performance profile read failed: {exc}"
+                return None
+
+    @classmethod
+    def set_manual_fan_speed(cls, percent: int, mode: str = "Balanced") -> bool:
+        """Apply manual exhaust fan speed duty cycle (0-100%).
+        
+        A value of 0 or <= 0 disables manual override, returning fan control to the
+        OEM automatic thermal curve governed by EC register 0x41.
+        Positive values enable manual override (0x41=1) and write safe proportional duty
+        cycles to CPU (0x4C) and GPU (0x4D) fan curve registers.
+        """
+        fan_limits = {
+            "Quiet": (73, 96),
+            "Balanced": (144, 183),
+            "Beast": (144, 183),
+        }
+        with cls._acpi_lock:
+            try:
+                acpi_obj = cls._get_acpi_method_provider()
+                clamped = max(0, min(100, int(percent)))
+                if clamped <= 0:
+                    if not cls._ec_write_ram(acpi_obj, 0x41, 0):
+                        return False
+                    cls._verify_ec_value(acpi_obj, 0x41, 0)
+                    cls._last_error = ""
+                    return True
+
+                if not cls._ec_write_ram(acpi_obj, 0x41, 1):
+                    return False
+                cls._verify_ec_value(acpi_obj, 0x41, 1)
+
+                cpu_max, gpu_max = fan_limits.get(mode, fan_limits["Balanced"])
+                cpu_duty = max(40, int(round(35 + (cpu_max - 35) * (clamped / 100.0))))
+                gpu_duty = max(45, int(round(45 + (gpu_max - 45) * (clamped / 100.0))))
+
+                if not cls._ec_write_ram(acpi_obj, 0x4C, cpu_duty):
+                    return False
+                if not cls._ec_write_ram(acpi_obj, 0x4D, gpu_duty):
+                    return False
+                cls._last_error = ""
+                return True
+            except Exception as exc:
+                cls._last_error = f"Manual fan speed update failed: {exc}"
+                return False
 
     @classmethod
     def set_full_fan_mode(cls, enable: bool, mode: str = "Balanced") -> bool:
-        """Apply the verified OEM full-fan EC sequence."""
-        fan_limits = {
-            "Quiet": (73, 96),
-            "Balanced": (104, 140),
-            "Beast": (144, 183),
-        }
-        try:
-            acpi_obj = cls._get_acpi_method_provider()
-            expected = 1 if enable else 0
-            if not cls._ec_write_ram(acpi_obj, 0x41, expected):
-                return False
-            cls._verify_ec_value(acpi_obj, 0x41, expected)
-            if enable:
-                cpu_limit, gpu_limit = fan_limits.get(mode, fan_limits["Balanced"])
-                cls._ec_write_ram(acpi_obj, 0x4C, cpu_limit)
-                cls._ec_write_ram(acpi_obj, 0x4D, gpu_limit)
-            cls._last_error = ""
-            return True
-        except Exception as e:
-            cls._last_error = f"Full-fan update failed: {e}"
-            return False
+        """Apply full fan (100%) or restore dynamic curve (0%)."""
+        if enable:
+            return cls.set_manual_fan_speed(100, mode)
+        return cls.set_manual_fan_speed(0, mode)
+
+    @classmethod
+    def get_fan_rpm(cls) -> Dict[str, Optional[int]]:
+        """Read dual exhaust fan tachometers (RPM) from OEM EC RAM registers 0x08 and 0x09."""
+        readings = {"cpu_fan": None, "gpu_fan": None, "fan_rpm": None}
+        with cls._acpi_lock:
+            try:
+                acpi_obj = cls._get_acpi_method_provider()
+                c_val = cls._ec_read_ram(acpi_obj, 0x08)
+                g_val = cls._ec_read_ram(acpi_obj, 0x09)
+                if c_val is not None and c_val > 0:
+                    readings["cpu_fan"] = int(c_val * 100)
+                if g_val is not None and g_val > 0:
+                    readings["gpu_fan"] = int(g_val * 100)
+                valid = [v for v in (readings["cpu_fan"], readings["gpu_fan"]) if v is not None and v > 0]
+                if valid:
+                    readings["fan_rpm"] = max(valid)
+            except Exception:
+                pass
+
+        if readings["fan_rpm"] is None:
+            try:
+                import telemetry_data
+                s_val = telemetry_data.sample_live_sensors().get("Fan")
+                if s_val is not None:
+                    readings["fan_rpm"] = int(s_val)
+            except Exception:
+                pass
+        return readings
 
     @classmethod
     def get_full_fan_mode(cls) -> Optional[bool]:
+        with cls._acpi_lock:
+            try:
+                value = cls._ec_read_ram(cls._get_acpi_method_provider(), 0x41)
+                cls._last_error = ""
+                return bool(value & 1)
+            except Exception as exc:
+                cls._last_error = f"Full-fan state read failed: {exc}"
+                return None
+
+    @classmethod
+    def get_fan_control_mode(cls) -> str:
+        """Returns 'Manual' if EC fan override is enabled, else 'Auto'."""
         try:
-            value = cls._ec_read_ram(cls._get_acpi_method_provider(), 0x41)
-            cls._last_error = ""
-            return bool(value & 1)
-        except Exception as exc:
-            cls._last_error = f"Full-fan state read failed: {exc}"
-            return None
+            mode = cls.get_full_fan_mode()
+            return "Manual" if mode else "Auto"
+        except Exception:
+            return "Auto"
 
     @classmethod
     def set_usb_sleep_charging(cls, enable: bool) -> bool:
@@ -1558,77 +1670,7 @@ class HardwareEngine:
 
     @staticmethod
     def get_temperature_readings():
-        """Use real published sensor readings; missing sensors stay unavailable."""
-        readings = {"CPU": None, "GPU": None}
-        import pythoncom
-        import win32com.client
-        import gc
-        pythoncom.CoInitialize()
-        try:
-            locator = win32com.client.Dispatch("WbemScripting.SWbemLocator")
-            for namespace in (r"root\LibreHardwareMonitor", r"root\OpenHardwareMonitor"):
-                try:
-                    services = locator.ConnectServer(".", namespace)
-                    sensors = services.ExecQuery("SELECT Identifier, Value FROM Sensor")
-                    for sensor in sensors:
-                        identity = str(sensor.Properties_("Identifier").Value or "").lower()
-                        kind = "CPU" if "cpu" in identity else "GPU" if "gpu" in identity else None
-                        value = sensor.Properties_("Value").Value
-                        if kind and value is not None and 0 <= float(value) <= 125:
-                            readings[kind] = max(readings[kind] or 0, float(value))
-                    del sensor, sensors, services
-                    if any(value is not None for value in readings.values()):
-                        break
-                except Exception:
-                    continue
-
-            # Fallback 1: Windows ACPI / EC Thermal Zone perf counters for CPU
-            if readings["CPU"] is None:
-                try:
-                    services = locator.ConnectServer(".", r"root\cimv2")
-                    tzs = services.ExecQuery("SELECT Name, Temperature FROM Win32_PerfFormattedData_Counters_ThermalZoneInformation")
-                    for tz in tzs:
-                        name = str(tz.Properties_("Name").Value or "").upper()
-                        temp_k = tz.Properties_("Temperature").Value
-                        if temp_k and float(temp_k) > 200:
-                            temp_c = float(temp_k) - 273.15
-                            if 15.0 <= temp_c <= 115.0:
-                                if "EC0" in name or "TZRZ" in name or readings["CPU"] is None:
-                                    readings["CPU"] = round(temp_c, 1)
-                    del tz, tzs, services
-                except Exception:
-                    pass
-
-            del locator
-
-            # Fallback 2: NVML / NVIDIA Driver for GPU
-            if readings["GPU"] is None:
-                try:
-                    import ctypes
-                    nvml = ctypes.CDLL("nvml.dll")
-                    if nvml.nvmlInit_v2() == 0:
-                        try:
-                            dev = ctypes.c_void_p()
-                            if nvml.nvmlDeviceGetHandleByIndex_v2(0, ctypes.byref(dev)) == 0:
-                                gpu_t = ctypes.c_uint()
-                                if nvml.nvmlDeviceGetTemperature(dev, 0, ctypes.byref(gpu_t)) == 0:
-                                    val = float(gpu_t.value)
-                                    if 15.0 <= val <= 115.0:
-                                        readings["GPU"] = val
-                        finally:
-                            try:
-                                nvml.nvmlShutdown()
-                            except Exception:
-                                pass
-                except Exception:
-                    pass
-        finally:
-            gc.collect()
-            try:
-                pythoncom.CoUninitialize()
-            except Exception:
-                pass
-        return readings
+        return telemetry_data.get_sensor_readings()
 
     _last_open_failure = 0.0
 
@@ -1955,15 +1997,46 @@ class HardwareEngine:
             return False
 
     @classmethod
-    def set_windows_power_plan(cls, mode: str):
-        """Switch the Windows plan while preserving the user's display brightness."""
+    def set_windows_power_plan(cls, mode: str) -> bool:
+        """Switch the Windows power scheme, configure Windows Energy Saver, and adjust screen brightness.
+
+        - Quiet (Power Saving Mode):
+            - Automatically enables Windows Energy Saver (sets AC and DC threshold to 100%)
+            - Switches active Windows power scheme to Power Saver (a1841308-3541-4fab-bc81-f71556f20b4a)
+            - Automatically decreases internal screen display brightness by 5%
+            - Configures Windows 11 Modern Power Mode overlay to 'Best power efficiency'
+        - Balanced / Beast (Gaming):
+            - Restores Windows Balanced or High Performance power scheme
+            - Restores normal Windows Energy Saver thresholds (disabling forced saver)
+            - Restores previously saved screen brightness if dimmed upon entering Quiet mode
+            - Restores Windows 11 Modern Power Mode overlay
+        """
         guid_map = {
             "Quiet": "a1841308-3541-4fab-bc81-f71556f20b4a",     # Power Saver
             "Balanced": "381b4222-f694-41f0-9685-ff5bb260df2e",  # Balanced
             "Beast": "8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c"      # High Performance
         }
         guid = guid_map.get(mode, guid_map["Balanced"])
-        display_brightness = cls.get_display_brightness()
+        is_quiet = (mode == "Quiet")
+        was_quiet = (cls._last_power_plan_mode == "Quiet")
+
+        # 1. Screen display brightness calculation
+        current_brightness = cls.get_display_brightness()
+        target_brightness = None
+
+        if is_quiet:
+            if not was_quiet and current_brightness is not None:
+                # Decreasing 5% brightness upon switching to Quiet / Power saving mode
+                cls._saved_pre_quiet_brightness = current_brightness
+                target_brightness = max(0, min(100, current_brightness - 5))
+        else:
+            if was_quiet and cls._saved_pre_quiet_brightness is not None:
+                # Restore previous screen brightness when leaving Quiet mode
+                target_brightness = cls._saved_pre_quiet_brightness
+                cls._saved_pre_quiet_brightness = None
+
+        # 2. Switch Windows Active Power Scheme
+        ok = False
         try:
             result = subprocess.run(
                 ["powercfg.exe", "/setactive", guid],
@@ -1972,12 +2045,427 @@ class HardwareEngine:
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
                 timeout=5,
             )
-            ok = result.returncode == 0
-            if ok and display_brightness is not None:
-                cls.set_display_brightness(display_brightness)
-            return ok
+            ok = (result.returncode == 0)
         except Exception:
-            return False
+            ok = False
+
+        # 3. Configure Windows Energy Saver (thresholds and policy)
+        try:
+            if is_quiet:
+                # Force Energy Saver on DC (battery) to 100% so it is immediately active
+                subprocess.run(
+                    ["powercfg.exe", "/setdcvalueindex", "SCHEME_CURRENT", "SUB_ENERGYSAVER", "ESBATTTHRESHOLD", "100"],
+                    capture_output=True, text=True,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0), timeout=5
+                )
+                # Force Energy Saver on AC (plugged in) to 100%
+                subprocess.run(
+                    ["powercfg.exe", "/setacvalueindex", "SCHEME_CURRENT", "SUB_ENERGYSAVER", "ESBATTTHRESHOLD", "100"],
+                    capture_output=True, text=True,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0), timeout=5
+                )
+            else:
+                # Restore default thresholds (DC: 30% for Balanced, 20% for Beast; AC: 0%)
+                dc_thresh = "20" if mode == "Beast" else "30"
+                subprocess.run(
+                    ["powercfg.exe", "/setdcvalueindex", "SCHEME_CURRENT", "SUB_ENERGYSAVER", "ESBATTTHRESHOLD", dc_thresh],
+                    capture_output=True, text=True,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0), timeout=5
+                )
+                subprocess.run(
+                    ["powercfg.exe", "/setacvalueindex", "SCHEME_CURRENT", "SUB_ENERGYSAVER", "ESBATTTHRESHOLD", "0"],
+                    capture_output=True, text=True,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0), timeout=5
+                )
+            # Re-activate current scheme so threshold changes take effect immediately
+            subprocess.run(
+                ["powercfg.exe", "/setactive", "SCHEME_CURRENT"],
+                capture_output=True, text=True,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0), timeout=5
+            )
+        except Exception:
+            pass
+
+        # 4. Update Windows 11 Modern Power Overlay & Registry Policy
+        try:
+            import winreg
+            overlay_map = {
+                "Quiet": "961cc777-2547-4f9d-8174-7d86181b8a7a",    # Best power efficiency
+                "Balanced": "00000000-0000-0000-0000-000000000000", # Balanced
+                "Beast": "ded574b5-45a0-4f42-8737-46345c09c238"     # Best performance
+            }
+            overlay_guid = overlay_map.get(mode, overlay_map["Balanced"])
+            try:
+                with winreg.OpenKey(
+                    winreg.HKEY_LOCAL_MACHINE,
+                    r"SYSTEM\CurrentControlSet\Control\Power\User\PowerSchemes",
+                    0, winreg.KEY_SET_VALUE
+                ) as key:
+                    winreg.SetValueEx(key, "ActiveOverlayAcPowerScheme", 0, winreg.REG_SZ, overlay_guid)
+                    winreg.SetValueEx(key, "ActiveOverlayDcPowerScheme", 0, winreg.REG_SZ, overlay_guid)
+            except Exception:
+                pass
+
+            try:
+                with winreg.OpenKey(
+                    winreg.HKEY_LOCAL_MACHINE,
+                    r"SYSTEM\CurrentControlSet\Control\Power",
+                    0, winreg.KEY_SET_VALUE
+                ) as key:
+                    winreg.SetValueEx(key, "EnergySaverState", 0, winreg.REG_DWORD, 1 if is_quiet else 0)
+            except Exception:
+                pass
+
+            try:
+                key_path = r"SOFTWARE\Policies\Microsoft\Power\EnergySaver"
+                key = winreg.CreateKey(winreg.HKEY_LOCAL_MACHINE, key_path)
+                winreg.SetValueEx(key, "EnableEnergySaver", 0, winreg.REG_DWORD, 1 if is_quiet else 0)
+                winreg.CloseKey(key)
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+        # 5. Apply the target screen brightness or preserve existing display brightness
+        if target_brightness is not None:
+            cls.set_display_brightness(target_brightness)
+        elif not is_quiet and current_brightness is not None:
+            cls.set_display_brightness(current_brightness)
+
+        cls._last_power_plan_mode = mode
+        return ok
+
+
+# ---------------------------------------------------------------------------
+# Windows On-Screen Display (OSD) Overlay Toast for Performance Mode
+# ---------------------------------------------------------------------------
+class ModeOSDOverlay:
+    """Windows On-Screen Display (OSD) overlay toast for Performance Mode changes.
+    Matches OEM PopupImageWindow behavior:
+    - Undecorated, topmost, non-activating window (never steals focus from games)
+    - Positioned at bottom-center of the screen (PrimaryScreenHeight - Height - 75px)
+    - Shows authentic OEM mode graphics (Quiet / Balanced / Beast)
+    - Auto-dismisses after 1.8 seconds with smooth in-place update capability
+    """
+    def __init__(self, master=None):
+        self.master = master
+        self.window = None
+        self._hide_timer = None
+        self._images = {}
+        self.card_frame = None
+        self.icon_label = None
+        self.title_label = None
+        self.sub_label = None
+        self._load_images()
+
+    def _get_asset_path(self, filename: str) -> Optional[str]:
+        candidates = [
+            os.path.join(getattr(sys, "_MEIPASS", APP_DIR), "assets", "osd", filename),
+            os.path.join(APP_DIR, "assets", "osd", filename),
+            os.path.join(os.getcwd(), "assets", "osd", filename),
+        ]
+        for c in candidates:
+            if os.path.exists(c):
+                return c
+        return None
+
+    def _load_images(self):
+        mapping = {
+            "Quiet": "mode_quiet.png",
+            "Balanced": "mode_balanced.png",
+            "Beast": "mode_beast.png",
+        }
+        for mode, filename in mapping.items():
+            path = self._get_asset_path(filename)
+            if path and os.path.exists(path):
+                try:
+                    im = Image.open(path).convert("RGBA")
+                    im = im.resize((96, 96), Image.Resampling.LANCZOS)
+                    self._images[mode] = ImageTk.PhotoImage(im, master=self.master)
+                except Exception:
+                    pass
+
+    def show(self, mode: str):
+        """Thread-safe show entry point dispatched to master Tk loop."""
+        if self.master is None:
+            return
+        try:
+            self.master.after(0, lambda: self._show_impl(mode))
+        except Exception:
+            pass
+
+    def _show_impl(self, mode: str):
+        if mode == "Gaming":
+            mode = "Beast"
+        if mode not in ("Quiet", "Balanced", "Beast"):
+            mode = "Balanced"
+
+        if self.window is None or not self.window.winfo_exists():
+            self._create_window()
+
+        img = self._images.get(mode)
+        if img:
+            self.icon_label.configure(image=img, text="")
+            self.icon_label.image = img
+        else:
+            icons = {"Quiet": "🌱", "Balanced": "⚖️", "Beast": "🚀"}
+            self.icon_label.configure(image="", text=icons.get(mode, "⚡"), font=("Segoe UI Emoji", 36))
+
+        titles = {
+            "Quiet": ("QUIET MODE", "#22C55E", "Whisper Silent • Power Saver"),
+            "Balanced": ("BALANCED MODE", "#38BDF8", "Optimal Performance & Thermals"),
+            "Beast": ("BEAST MODE", "#EF4444", "Maximum TDP • Full Fan Boost"),
+        }
+        title_text, color, subtitle = titles.get(mode, ("BALANCED MODE", "#38BDF8", "Standard Mode"))
+        self.title_label.configure(text=title_text, fg=color)
+        self.sub_label.configure(text=subtitle)
+        self.card_frame.configure(highlightbackground=color)
+
+        self._position_window()
+        self.window.deiconify()
+        self.window.lift()
+
+        if self._hide_timer:
+            try:
+                self.master.after_cancel(self._hide_timer)
+            except Exception:
+                pass
+        self._hide_timer = self.master.after(1800, self.hide)
+
+    def _create_window(self):
+        self.window = tk.Toplevel(self.master)
+        self.window.withdraw()
+        self.window.overrideredirect(True)
+        self.window.attributes("-topmost", True)
+        self.window.attributes("-alpha", 0.95)
+        self.window.configure(bg="#0F172A")
+
+        # Win32 non-activating extended styles
+        try:
+            hwnd = ctypes.windll.user32.GetParent(self.window.winfo_id()) or self.window.winfo_id()
+            user32 = ctypes.windll.user32
+            GWL_EXSTYLE = -20
+            WS_EX_TOOLWINDOW = 0x00000080
+            WS_EX_NOACTIVATE = 0x08000000
+            WS_EX_TOPMOST = 0x00000008
+            ex = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+            user32.SetWindowLongW(hwnd, GWL_EXSTYLE, ex | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TOPMOST)
+        except Exception:
+            pass
+
+        self.card_frame = tk.Frame(
+            self.window, bg="#0F172A",
+            highlightthickness=2, highlightbackground="#38BDF8",
+            padx=16, pady=12
+        )
+        self.card_frame.pack(fill="both", expand=True)
+
+        self.icon_label = tk.Label(self.card_frame, bg="#0F172A")
+        self.icon_label.pack(side="left", padx=(0, 14))
+
+        text_col = tk.Frame(self.card_frame, bg="#0F172A")
+        text_col.pack(side="left", fill="both", expand=True)
+
+        badge_lbl = tk.Label(
+            text_col, text="PERFORMANCE PROFILE",
+            font=("Segoe UI", 8, "bold"), fg="#94A3B8", bg="#0F172A", anchor="w"
+        )
+        badge_lbl.pack(fill="x", pady=(2, 0))
+
+        self.title_label = tk.Label(
+            text_col, text="BALANCED MODE",
+            font=("Segoe UI", 15, "bold"), fg="#38BDF8", bg="#0F172A", anchor="w"
+        )
+        self.title_label.pack(fill="x", pady=(0, 2))
+
+        self.sub_label = tk.Label(
+            text_col, text="Optimal Performance & Thermals",
+            font=("Segoe UI", 9), fg="#CBD5E1", bg="#0F172A", anchor="w"
+        )
+        self.sub_label.pack(fill="x")
+
+    def _position_window(self):
+        w = 340
+        h = 120
+        try:
+            sw = self.master.winfo_screenwidth()
+            sh = self.master.winfo_screenheight()
+        except Exception:
+            sw, sh = 1920, 1080
+        x = max(0, (sw - w) // 2)
+        y = max(0, sh - h - 80)
+        self.window.geometry(f"{w}x{h}+{x}+{y}")
+
+    def hide(self):
+        if self.window and self.window.winfo_exists():
+            try:
+                self.window.withdraw()
+            except Exception:
+                pass
+        self._hide_timer = None
+
+
+# ---------------------------------------------------------------------------
+# Hardware Performance Mode Button & Key Listener
+# ---------------------------------------------------------------------------
+class HardwareModeListener:
+    """Monitors OEM hardware performance mode buttons on Infinix GT Book.
+    Uses a dual-detection architecture:
+    1. Background EC RAM 0x40 polling thread (detects hardware-autonomous mode changes).
+    2. Low-level Windows keyboard hook (WH_KEYBOARD_LL) to capture keyboard mode hotkeys.
+    """
+    def __init__(self, callback, poll_interval: float = 0.35):
+        self.callback = callback
+        self.poll_interval = poll_interval
+        self._running = False
+        self._poll_thread = None
+        self._hook_thread = None
+        self._hook = None
+        self._hook_proc = None
+        self._thread_id = None
+        self.last_ec_mode = None
+
+    def start(self):
+        if self._running:
+            return
+        self._running = True
+        self._poll_thread = threading.Thread(target=self._ec_poll_worker, name="ECModePoller", daemon=True)
+        self._poll_thread.start()
+        self._hook_thread = threading.Thread(target=self._keyboard_hook_worker, name="ModeKeyHook", daemon=True)
+        self._hook_thread.start()
+        self._wmi_thread = threading.Thread(target=self._wmi_acpi_worker, name="WmiAcpiWatcher", daemon=True)
+        self._wmi_thread.start()
+
+    def _wmi_acpi_worker(self):
+        try:
+            import pythoncom
+            pythoncom.CoInitialize()
+            import wmi
+            c = wmi.WMI(namespace="root/wmi")
+            watcher = c.watch_for(notification_type="Creation", wmi_class="Acpi_Event", delay_secs=1)
+            while self._running:
+                try:
+                    event = watcher(timeout_ms=1000)
+                    if event and self._running:
+                        time.sleep(0.08)
+                        mode = HardwareEngine.get_performance_mode()
+                        if mode and self.callback:
+                            self.last_ec_mode = mode
+                            self.callback(mode, "acpi_event")
+                except wmi.x_wmi_timed_out:
+                    continue
+                except Exception:
+                    time.sleep(1.0)
+        except Exception:
+            pass
+        finally:
+            try:
+                pythoncom.CoUninitialize()
+            except Exception:
+                pass
+
+    def stop(self):
+        self._running = False
+        if self._hook:
+            try:
+                ctypes.windll.user32.UnhookWindowsHookEx(self._hook)
+            except Exception:
+                pass
+            self._hook = None
+        if self._thread_id:
+            try:
+                ctypes.windll.user32.PostThreadMessageW(self._thread_id, 0x0012, 0, 0)
+            except Exception:
+                pass
+
+    def _ec_poll_worker(self):
+        try:
+            mode = HardwareEngine.get_performance_mode()
+            if mode:
+                self.last_ec_mode = mode
+        except Exception:
+            pass
+
+        while self._running:
+            try:
+                time.sleep(self.poll_interval)
+                if not self._running:
+                    break
+                mode = HardwareEngine.get_performance_mode()
+                if mode and mode in ("Quiet", "Balanced", "Beast"):
+                    if self.last_ec_mode is None:
+                        self.last_ec_mode = mode
+                    elif mode != self.last_ec_mode:
+                        self.last_ec_mode = mode
+                        if self.callback:
+                            self.callback(mode, "hardware_ec")
+            except Exception:
+                pass
+
+    def _keyboard_hook_worker(self):
+        user32 = ctypes.windll.user32
+        self._thread_id = ctypes.windll.kernel32.GetCurrentThreadId()
+        WH_KEYBOARD_LL = 13
+        WM_KEYDOWN = 0x0100
+        WM_SYSKEYDOWN = 0x0104
+
+        class KBDLLHOOKSTRUCT(ctypes.Structure):
+            _fields_ = [
+                ("vkCode", wintypes.DWORD),
+                ("scanCode", wintypes.DWORD),
+                ("flags", wintypes.DWORD),
+                ("time", wintypes.DWORD),
+                ("dwExtraInfo", ctypes.c_size_t),
+            ]
+
+        HOOKPROC = ctypes.WINFUNCTYPE(ctypes.c_ssize_t, ctypes.c_int, ctypes.c_size_t, ctypes.c_void_p)
+
+        def low_level_handler(nCode, wParam, lParam):
+            if nCode >= 0 and self._running and wParam in (WM_KEYDOWN, WM_SYSKEYDOWN):
+                try:
+                    kb = ctypes.cast(lParam, ctypes.POINTER(KBDLLHOOKSTRUCT))[0]
+                    vk = kb.vkCode
+                    target_mode = None
+                    # F15 / F18 / F21 -> Quiet
+                    if vk in (0x7E, 0x81, 0x84):
+                        target_mode = "Quiet"
+                    # F16 / F19 / F22 -> Balanced
+                    elif vk in (0x7F, 0x82, 0x85):
+                        target_mode = "Balanced"
+                    # F17 / F20 / F23 -> Beast
+                    elif vk in (0x80, 0x83, 0x86):
+                        target_mode = "Beast"
+
+                    if target_mode and self.callback:
+                        self.callback(target_mode, "keyboard_hotkey")
+                except Exception:
+                    pass
+            return user32.CallNextHookEx(self._hook, nCode, wParam, lParam)
+
+        self._hook_proc = HOOKPROC(low_level_handler)
+        self._hook = user32.SetWindowsHookExW(
+            WH_KEYBOARD_LL,
+            self._hook_proc,
+            ctypes.windll.kernel32.GetModuleHandleW(None),
+            0
+        )
+
+        if not self._running:
+            if self._hook:
+                user32.UnhookWindowsHookEx(self._hook)
+                self._hook = None
+            return
+
+        msg = wintypes.MSG()
+        try:
+            while user32.GetMessageW(ctypes.byref(msg), 0, 0, 0) > 0:
+                user32.TranslateMessage(ctypes.byref(msg))
+                user32.DispatchMessageW(ctypes.byref(msg))
+        finally:
+            if self._hook:
+                user32.UnhookWindowsHookEx(self._hook)
+            self._hook = None
+            self._thread_id = None
 
 
 # ---------------------------------------------------------------------------
@@ -2281,6 +2769,7 @@ class InfinixGTToolkitApp:
         self.bz_brightness = self.config.get("bz_brightness", 100)
         self.cpu_temp_val = None
         self.gpu_temp_val = None
+        self._sensor_readings = dict.fromkeys(telemetry_data.SENSOR_KEYS)
         self.battery_val = 100
         self.on_ac_val = True
         self._cached_bat_health = None
@@ -2357,6 +2846,7 @@ class InfinixGTToolkitApp:
         self._apply_lighting_hardware()
         self._apply_backzone_hardware()
         initial_mode = self.config.get("power_mode", "Balanced")
+        HardwareEngine._last_power_plan_mode = initial_mode
         # Performance modes are hardware-only.  Do not activate a Windows power
         # plan here: Windows plans can own the display-brightness policy.
         InfinixGTToolkitApp._submit_hardware_command(
@@ -2394,6 +2884,11 @@ class InfinixGTToolkitApp:
         # Listen for system sleep and wake transitions to prevent handle corruption
         self.power_listener = None
         self._start_power_listener()
+
+        # Listen for physical performance mode buttons & OSD notifications
+        self.mode_osd = None
+        self.hardware_mode_listener = None
+        self._start_hardware_mode_listener()
 
         # Handle Window Protocol
         self.root.protocol("WM_DELETE_WINDOW", self._on_close_requested)
@@ -2525,6 +3020,179 @@ class InfinixGTToolkitApp:
             self.power_listener.start()
         except Exception:
             self.power_listener = None
+
+    def _start_hardware_mode_listener(self):
+        """Initializes listener for physical keyboard performance mode buttons and EC status."""
+        try:
+            self.mode_osd = ModeOSDOverlay(self.root)
+            self.hardware_mode_listener = HardwareModeListener(
+                callback=self._on_hardware_mode_changed,
+                poll_interval=0.35
+            )
+            self.hardware_mode_listener.start()
+        except Exception as exc:
+            logger = getattr(self, "logger", None)
+            if logger:
+                logger.warning(f"Could not start hardware mode listener: {exc}")
+            self.hardware_mode_listener = None
+
+    def _on_hardware_mode_changed(self, mode: str, source: str = "hardware_ec"):
+        """Called when a performance mode change is initiated by hardware buttons or hotkeys."""
+        self._ui_dispatch(lambda: self._apply_hardware_mode_change(mode, source))
+
+    def _apply_hardware_mode_change(self, mode: str, source: str = "hardware_ec"):
+        if mode == "Gaming":
+            mode = "Beast"
+        if mode not in ("Quiet", "Balanced", "Beast"):
+            return
+
+        display_mode = "Gaming" if mode == "Beast" else mode
+        self.config["power_mode"] = mode
+        if hasattr(self, "mode_var"):
+            self.mode_var.set(mode)
+        if hasattr(self, "mode_display_var"):
+            self.mode_display_var.set(display_mode)
+        if hasattr(self, "mode_selector"):
+            try:
+                self.mode_selector.set(display_mode)
+            except Exception:
+                pass
+
+        if hasattr(self, "_set_mode_apply_status"):
+            self._set_mode_apply_status(f"●  {display_mode} mode active", THEME["accent_green"])
+
+        if hasattr(self, "_save_config"):
+            self._save_config()
+
+        if hasattr(self, "_update_telemetry_mode_buttons"):
+            self._update_telemetry_mode_buttons()
+
+        if source == "keyboard_hotkey":
+            try:
+                HardwareEngine.set_performance_mode(mode)
+            except Exception as exc:
+                logger = getattr(self, "logger", None)
+                if logger:
+                    logger.warning(f"Could not write EC mode from hotkey: {exc}")
+        else:
+            try:
+                HardwareEngine.set_windows_power_plan(mode)
+            except Exception as exc:
+                pass
+
+        if hasattr(self, "_show_mode_osd"):
+            self._show_mode_osd(mode)
+
+    def _show_mode_osd(self, mode: str):
+        """Displays the Windows mini notification / OSD popup on screen."""
+        osd = getattr(self, "mode_osd", None)
+        if osd is not None:
+            try:
+                osd.show(mode)
+            except Exception as exc:
+                logger = getattr(self, "logger", None)
+                if logger:
+                    logger.warning(f"Could not display mode OSD: {exc}")
+
+    # Exhaust Fan Speed Controls (Manual Slider & Dynamic EC Mode)
+    def _on_fan_control_mode_changed(self, mode_str):
+        if mode_str == "Manual Control":
+            self.fan_control_mode = "manual"
+            self.config["fan_control_mode"] = "manual"
+            speed = self.fan_speed_var.get()
+            self._submit_fan_speed_command(speed)
+        else:
+            self.fan_control_mode = "auto"
+            self.config["fan_control_mode"] = "auto"
+            self._submit_fan_speed_command(0)
+        self._update_fan_chips_ui()
+
+    def _on_fan_slider_moving(self, value):
+        val = int(value)
+        self.manual_fan_speed = val
+        if hasattr(self, "fan_slider_val_lbl") and self.fan_slider_val_lbl.winfo_exists():
+            self.fan_slider_val_lbl.configure(text=f"{val}%")
+        self.fan_control_mode = "manual"
+        self.config["fan_control_mode"] = "manual"
+        if hasattr(self, "fan_mode_var"):
+            self.fan_mode_var.set("Manual Control")
+        self._update_fan_chips_ui()
+        if hasattr(self, "_fan_debounce_job") and self._fan_debounce_job:
+            try:
+                self.root.after_cancel(self._fan_debounce_job)
+            except Exception:
+                pass
+        self._fan_debounce_job = self.root.after(250, lambda: self._submit_fan_speed_command(val))
+
+    def _on_fan_slider_released(self, event=None):
+        if hasattr(self, "_fan_debounce_job") and self._fan_debounce_job:
+            try:
+                self.root.after_cancel(self._fan_debounce_job)
+            except Exception:
+                pass
+            self._fan_debounce_job = None
+        self._submit_fan_speed_command(self.manual_fan_speed)
+
+    def _apply_fan_preset(self, pct: int):
+        self.manual_fan_speed = pct
+        self.fan_speed_var.set(pct)
+        if hasattr(self, "fan_speed_slider") and self.fan_speed_slider.winfo_exists():
+            self.fan_speed_slider.set(pct)
+        if hasattr(self, "fan_slider_val_lbl") and self.fan_slider_val_lbl.winfo_exists():
+            self.fan_slider_val_lbl.configure(text=f"{pct}%")
+        self.fan_control_mode = "manual"
+        self.config["fan_control_mode"] = "manual"
+        if hasattr(self, "fan_mode_var"):
+            self.fan_mode_var.set("Manual Control")
+        self._update_fan_chips_ui()
+        self._submit_fan_speed_command(pct)
+
+    def _update_fan_chips_ui(self):
+        if hasattr(self, "fan_mode_chip") and self.fan_mode_chip.winfo_exists():
+            if getattr(self, "fan_control_mode", "auto") == "manual":
+                self.fan_mode_chip.configure(
+                    text=f"● Manual ({getattr(self, 'manual_fan_speed', 75)}%)",
+                    text_color=THEME["accent_amber"]
+                )
+            else:
+                self.fan_mode_chip.configure(
+                    text="● Dynamic Auto (EC Curve)",
+                    text_color=THEME["accent_green"]
+                )
+        if hasattr(self, "fan_preset_btns"):
+            for p_val, btn in self.fan_preset_btns.items():
+                if btn.winfo_exists():
+                    is_cur = (getattr(self, "fan_control_mode", "auto") == "manual" and getattr(self, "manual_fan_speed", 75) == p_val)
+                    btn.configure(
+                        font=ctk.CTkFont(size=12, weight="bold" if is_cur else "normal"),
+                        border_width=2 if is_cur else 1,
+                        border_color=THEME["accent_blue"] if is_cur else THEME["card_border"],
+                        text_color=THEME["accent_blue"] if is_cur else THEME["button_text"]
+                    )
+
+    def _submit_fan_speed_command(self, speed_percent: int):
+        self.manual_fan_speed = speed_percent
+        self.config["manual_fan_speed"] = speed_percent
+        self._save_config()
+        mode_name = self.mode_var.get() if hasattr(self, "mode_var") else "Balanced"
+        if hasattr(self, "cooler_var"):
+            self.cooler_var.set(speed_percent >= 100)
+            self.config["cooler_boost"] = (speed_percent >= 100)
+
+        InfinixGTToolkitApp._submit_hardware_command(
+            self, "fan-speed",
+            lambda: HardwareEngine.set_manual_fan_speed(speed_percent, mode_name),
+            lambda result: self._finish_fan_speed_command(result, speed_percent)
+        )
+
+    def _finish_fan_speed_command(self, result, speed_percent: int):
+        if hasattr(self, "_set_hardware_status"):
+            desc = f"Exhaust Fan ({speed_percent}%)" if speed_percent > 0 else "Dynamic Auto Cooling"
+            self._set_hardware_status(
+                result.ok, desc, result.error,
+                show_dialog=not result.ok,
+                retry=None if result.ok else lambda: self._submit_fan_speed_command(speed_percent)
+            )
 
     def _on_power_suspend(self):
         """Safely release low-level hardware handles before Windows suspends USB power."""
@@ -2844,28 +3512,28 @@ class InfinixGTToolkitApp:
     # Left Sidebar Navigation (Modern High-Visibility)
     # -----------------------------------------------------------------------
     def _build_sidebar(self):
-        self.sidebar_shell = neon_ui.Frame(
-            self.root, width=310, corner_radius=22,
+        self.sidebar_shell = ctk.CTkFrame(
+            self.root, width=310, corner_radius=18,
             fg_color=THEME["sidebar_bg"], border_width=1,
-            border_color=THEME["accent_blue"])
+            border_color=("#DCE4EE", "#23344A"))
         self.sidebar_shell.pack(side="left", fill="y", padx=(14, 10), pady=14)
         self.sidebar_shell.pack_propagate(False)
-        self.sidebar = ctk.CTkScrollableFrame(self.sidebar_shell, fg_color="transparent", width=286)
-        self.sidebar.pack(fill="both", expand=True, padx=4, pady=10)
+        self.sidebar = ctk.CTkFrame(self.sidebar_shell, fg_color="transparent", width=286)
+        self.sidebar.pack(fill="both", expand=True, padx=8, pady=8)
 
         # Brand Header
-        brand_box = neon_ui.Frame(self.sidebar, fg_color="transparent")
-        brand_box.pack(fill="x", padx=10, pady=(8, 4))
+        brand_box = ctk.CTkFrame(self.sidebar, fg_color="transparent")
+        brand_box.pack(fill="x", padx=10, pady=(2, 2))
 
-        brand_row = neon_ui.Frame(brand_box, fg_color="transparent")
+        brand_row = ctk.CTkFrame(brand_box, fg_color="transparent")
         brand_row.pack(anchor="w")
 
-        bolt_lbl = ctk.CTkLabel(brand_row, text="ϟ", width=28,
-                               font=ctk.CTkFont(size=29, weight="bold"),
+        bolt_lbl = ctk.CTkLabel(brand_row, text="GT", width=36, height=36, corner_radius=10, fg_color=("#E4EEFF", "#172F4B"),
+                               font=ctk.CTkFont(size=16, weight="bold"),
                                text_color=THEME["accent_blue"])
         bolt_lbl.pack(side="left", padx=(0, 7))
 
-        title_lbl = ctk.CTkLabel(brand_row, text="Infinix GT Toolkit", font=ctk.CTkFont(size=16, weight="bold"), text_color=THEME["text_primary"])
+        title_lbl = ctk.CTkLabel(brand_row, text="Infinix Toolkit", font=ctk.CTkFont(size=16, weight="bold"), text_color=THEME["text_primary"])
         title_lbl.pack(side="left")
 
         ctk.CTkLabel(
@@ -2876,150 +3544,122 @@ class InfinixGTToolkitApp:
             padx=7, pady=2
         ).pack(side="left", padx=(7, 0), pady=(2, 0))
 
-        sub_lbl = ctk.CTkLabel(brand_box, text="  CONTROL CENTER", image=neon_ui.icon('settings',size=20), compound="left", height=40, corner_radius=12, fg_color=THEME["card_sub_bg"], font=ctk.CTkFont(size=12, weight="bold"), text_color=THEME["text_secondary"])
-        sub_lbl.pack(fill="x", pady=(14, 5))
+        sub_lbl = ctk.CTkLabel(brand_box, text="GT BOOK  /  CONTROL CENTER", anchor="w", height=20,
+                               font=ctk.CTkFont(size=10, weight="bold"), text_color=THEME["text_muted"])
+        sub_lbl.pack(fill="x", padx=4, pady=(6, 12))
 
-        sep = neon_ui.Frame(self.sidebar, height=1, fg_color=THEME["sidebar_border"])
+        sep = ctk.CTkFrame(self.sidebar, height=1, fg_color=THEME["sidebar_border"])
         sep.pack(fill="x", padx=14, pady=(0, 2))
 
         # Nav Buttons Container
         self.nav_buttons = {}
         nav_items = [
-            ("lighting", "💡    01   Lighting studio"),
-            ("backzone", "◉    02   Rear light bar"),
-            ("performance", "ϟ    03   Power & performance"),
-            ("telemetry", "▣    04   System monitor"),
-            ("presets", "⚙    05   Profiles & settings"),
-            ("about", "ⓘ    06   About device")
+            ("lighting", "Lighting studio"),
+            ("backzone", "Rear light bar"),
+            ("performance", "Power & performance"),
+            ("telemetry", "System monitor"),
+            ("about", "About device")
         ]
 
         for index, (key, title) in enumerate(nav_items):
             if index in (0, 2, 4):
                 group = {0: "PERSONALIZE", 2: "SYSTEM", 4: "WORKSPACE"}[index]
-                ctk.CTkLabel(self.sidebar, text=group, height=16,
+                ctk.CTkLabel(self.sidebar, text=group, height=14,
                              font=ctk.CTkFont(size=11, weight="bold"),
-                             text_color=THEME["text_secondary"]).pack(anchor="w", padx=22, pady=(7, 4))
-            btn = neon_ui.Button(
-                self.sidebar, text=title.split('    ', 1)[-1], image=neon_ui.icon(key, '#C5DFFF', 21),
-                anchor="w", height=46, corner_radius=13,
-                fg_color=THEME["button_bg"], text_color=THEME["nav_idle_text"],
-                hover_color=THEME["nav_hover"], font=ctk.CTkFont(size=14),
+                             text_color=THEME["text_secondary"]).pack(anchor="w", padx=20, pady=(12, 4))
+            btn = ctk.CTkButton(
+                self.sidebar, text=title, image=neon_ui.icon(key, '#7F9BBA', 18),
+                anchor="w", height=40, corner_radius=10, border_spacing=12,
+                fg_color="transparent", text_color=THEME["nav_idle_text"],
+                hover_color=THEME["nav_hover"], font=ctk.CTkFont(size=13),
                 command=lambda k=key: self._select_nav(k)
             )
-            btn.pack(fill="x", padx=8, pady=4)
-            btn._nav_chevron = True
+            btn.pack(fill="x", padx=8, pady=2)
             self.nav_buttons[key] = btn
             self.root.bind(f"<Alt-Key-{index + 1}>", lambda event, k=key: self._select_nav(k))
 
-        ctk.CTkLabel(self.sidebar, text="Alt + 1–6    Switch workspace", font=ctk.CTkFont(size=11),
-                     text_color=THEME["text_secondary"]).pack(anchor="w", padx=22, pady=(12, 0))
+        ctk.CTkLabel(self.sidebar, text="ALT 1–5   ·   Quick navigation", font=ctk.CTkFont(size=10),
+                     text_color=THEME["text_secondary"]).pack(anchor="w", padx=20, pady=(12, 0))
 
         # Bottom Mini Status Chip
-        side_footer = neon_ui.Frame(self.sidebar, fg_color=THEME["card_sub_bg"], corner_radius=14, border_width=1, border_color=THEME["card_border"])
-        side_footer.pack(side="bottom", fill="x", padx=5, pady=8)
+        side_footer = ctk.CTkFrame(self.sidebar, fg_color=THEME["card_sub_bg"], corner_radius=14, border_width=1, border_color=("#DCE4EE", "#23344A"))
+        side_footer.pack(fill="x", padx=8, pady=(22, 4))
 
         # Live Status Chip & Suggested Action
         self.side_status_badge = ctk.CTkLabel(
-            side_footer, text="System monitor",
+            side_footer, text="System overview",
             font=ctk.CTkFont(size=13, weight="bold"),
-            text_color="#4ADE80", anchor="w"
+            text_color=THEME["text_primary"], anchor="w"
         )
-        self.side_status_badge.pack(fill="x", padx=14, pady=(12, 1))
+        self.side_status_badge.pack(fill="x", padx=14, pady=(6, 0))
 
         self.side_action_lbl = ctk.CTkLabel(
             side_footer, text="Cool & quiet · Balanced performance",
             font=ctk.CTkFont(size=10),
             text_color=THEME["text_muted"], anchor="w",
-            wraplength=172, justify="left"
+            wraplength=240, justify="left"
         )
-        self.side_action_lbl.pack(fill="x", padx=14, pady=(0, 8))
-        self.side_action_lbl.bind("<Configure>", lambda e: self.side_action_lbl.configure(wraplength=max(100, e.width-4)))
+        self.side_action_lbl.pack(fill="x", padx=14, pady=(0, 4))
 
-        side_div = neon_ui.Frame(side_footer, height=1, fg_color=THEME["card_sub_border"])
+        side_div = ctk.CTkFrame(side_footer, height=1, fg_color=THEME["card_sub_border"])
         side_div.pack(fill="x", padx=10, pady=(0, 4))
 
         def metric_card(icon_name, color):
-            row = neon_ui.Frame(side_footer, fg_color=THEME["card_bg"], corner_radius=12,
-                                border_width=1, border_color=THEME["card_border"])
-            row.pack(fill="x", padx=8, pady=4)
-            ctk.CTkLabel(row, text="", image=neon_ui.icon(icon_name, color, 24), width=32).pack(side="left", padx=(8, 2), pady=10)
-            body = neon_ui.Frame(row, fg_color="transparent")
-            body.pack(side="left", fill="both", expand=True, padx=(0, 4), pady=5)
+            row = ctk.CTkFrame(side_footer, fg_color="transparent", corner_radius=0)
+            row.pack(fill="x", padx=8, pady=2)
+            ctk.CTkLabel(row, text="", image=neon_ui.icon(icon_name, color, 20), width=28).pack(side="left", padx=(4, 2), pady=2)
+            body = ctk.CTkFrame(row, fg_color="transparent")
+            body.pack(side="left", fill="both", expand=True, padx=(0, 4), pady=2)
             return body
 
         cpu_card = metric_card('cpu', '#69CDFA')
         self.side_cpu_lbl = ctk.CTkLabel(
-            cpu_card, text="CPU: --%",
+            cpu_card, text="CPU: --%", height=20,
             font=ctk.CTkFont(size=11, weight="bold"),
             text_color=THEME["accent_blue"]
         )
         self.side_cpu_lbl.pack(anchor="w", padx=12, pady=1)
-        self.side_cpu_bar = ctk.CTkProgressBar(cpu_card, height=6, progress_color=THEME["accent_blue"], fg_color=THEME["progress_bg"])
-        self.side_cpu_bar.pack(fill="x", padx=14, pady=(2, 7)); self.side_cpu_bar.set(0)
+        self.side_cpu_bar = ctk.CTkProgressBar(cpu_card, height=3, progress_color=THEME["accent_blue"], fg_color=THEME["progress_bg"])
+        self.side_cpu_bar.pack(fill="x", padx=14, pady=(1, 3)); self.side_cpu_bar.set(0)
 
         gpu_card = metric_card('gpu', '#30D9C4')
         self.side_gpu_lbl = ctk.CTkLabel(
-            gpu_card, text="GPU: --%",
+            gpu_card, text="GPU: --%", height=20,
             font=ctk.CTkFont(size=11, weight="bold"),
             text_color=THEME["accent_cyan"]
         )
         self.side_gpu_lbl.pack(anchor="w", padx=12, pady=1)
-        self.side_gpu_bar = ctk.CTkProgressBar(gpu_card, height=6, progress_color=THEME["accent_cyan"], fg_color=THEME["progress_bg"])
-        self.side_gpu_bar.pack(fill="x", padx=14, pady=(2, 7)); self.side_gpu_bar.set(0)
+        self.side_gpu_bar = ctk.CTkProgressBar(gpu_card, height=3, progress_color=THEME["accent_cyan"], fg_color=THEME["progress_bg"])
+        self.side_gpu_bar.pack(fill="x", padx=14, pady=(1, 3)); self.side_gpu_bar.set(0)
 
         ram_card = metric_card('ram', '#A78BFA')
         self.side_ram_lbl = ctk.CTkLabel(
-            ram_card, text="RAM: --%",
+            ram_card, text="RAM: --%", height=20,
             font=ctk.CTkFont(size=11, weight="bold"),
             text_color=THEME["accent_purple"]
         )
         self.side_ram_lbl.pack(anchor="w", padx=12, pady=1)
-        self.side_ram_bar = ctk.CTkProgressBar(ram_card, height=6, progress_color=THEME["accent_purple"], fg_color=THEME["progress_bg"])
-        self.side_ram_bar.pack(fill="x", padx=14, pady=(2, 7)); self.side_ram_bar.set(0)
+        self.side_ram_bar = ctk.CTkProgressBar(ram_card, height=3, progress_color=THEME["accent_purple"], fg_color=THEME["progress_bg"])
+        self.side_ram_bar.pack(fill="x", padx=14, pady=(1, 3)); self.side_ram_bar.set(0)
 
-        init_bat_txt = "⚡ Battery: --%"
+        init_bat_txt = "Battery: --%"
         init_hp = self.config.get("cached_bat_health_pct", None)
         if init_hp is not None and init_hp > 0:
             h_val = f"{init_hp:.1f}%" if (init_hp % 1 != 0) else f"{int(init_hp)}%"
             init_bat_txt += f" • Health: {h_val}"
         battery_card = metric_card('battery', '#39E86B')
         self.side_bat_lbl = ctk.CTkLabel(
-            battery_card, text=init_bat_txt,
+            battery_card, text=init_bat_txt, height=20,
             font=ctk.CTkFont(size=11, weight="bold"),
             text_color=THEME["accent_green"],
             cursor="hand2"
         )
         self.side_bat_lbl.pack(anchor="w", padx=(10, 4), pady=(1, 1))
         self.side_bat_lbl.bind("<Button-1>", lambda event: self._about_refresh_live(silent=False))
-        self.side_bat_bar = ctk.CTkProgressBar(battery_card, height=6, progress_color="#39E86B", fg_color=THEME["progress_bg"])
-        self.side_bat_bar.pack(fill="x", padx=14, pady=(2, 14)); self.side_bat_bar.set(0)
+        self.side_bat_bar = ctk.CTkProgressBar(battery_card, height=3, progress_color="#39E86B", fg_color=THEME["progress_bg"])
+        self.side_bat_bar.pack(fill="x", padx=14, pady=(1, 3)); self.side_bat_bar.set(0)
 
-        # Persistent device visual: it belongs to the sidebar, so page navigation
-        # never removes or redraws it.
-        sidebar_asset_root = getattr(sys, "_MEIPASS", APP_DIR)
-        sidebar_laptop_path = os.path.join(sidebar_asset_root, "assets", "gtbook_sidebar.webp")
-        if not os.path.exists(sidebar_laptop_path):
-            sidebar_laptop_path = os.path.join(ASSET_DIR, "gtbook_sidebar.webp")
-        try:
-            sidebar_laptop = Image.open(sidebar_laptop_path).convert("RGBA")
-            visible_bounds = sidebar_laptop.getbbox()
-            if visible_bounds:
-                sidebar_laptop = sidebar_laptop.crop(visible_bounds)
-            self.sidebar_laptop_image = ctk.CTkImage(
-                light_image=sidebar_laptop, dark_image=sidebar_laptop, size=(210, 126)
-            )
-            device_banner = neon_ui.Frame(self.sidebar, fg_color=THEME["card_bg"],
-                corner_radius=16, border_width=1, border_color=THEME["card_border"])
-            device_banner.pack(side="bottom", fill="x", padx=6, pady=(10, 5))
-            ctk.CTkLabel(device_banner, text="INFINIX GTBOOK", anchor="w",
-                font=ctk.CTkFont(size=14, weight="bold"), text_color=THEME["text_primary"]).pack(fill="x", padx=12, pady=(10,0))
-            self.sidebar_laptop_label = ctk.CTkLabel(
-                device_banner, text="", image=self.sidebar_laptop_image,
-                fg_color="transparent"
-            )
-            self.sidebar_laptop_label.pack(side="bottom", pady=(0, 4))
-        except Exception:
-            self.sidebar_laptop_image = None
+        # Navigation and live metrics share a fixed, non-scrolling sidebar.
 
     def _select_nav(self, key: str):
         key = {"gaming": "performance", "battery": "performance"}.get(key, key)
@@ -3031,15 +3671,15 @@ class InfinixGTToolkitApp:
         for k, btn in self.nav_buttons.items():
             if k == key:
                 btn.configure(
-                    fg_color=THEME["nav_active_bg"],
-                    text_color=THEME["nav_active_text"],
-                    border_width=1.5,
+                    fg_color=("#E5EFFF", "#1A3453"),
+                    text_color=("#1659A6", "#D9EBFF"),
+                    border_width=0,
                     border_color=THEME["nav_active_border"],
-                    hover_color=THEME["nav_active_bg"]
+                    hover_color=("#E5EFFF", "#1A3453")
                 )
             else:
                 btn.configure(
-                    fg_color=THEME["button_bg"],
+                    fg_color="transparent",
                     text_color=THEME["nav_idle_text"],
                     border_width=0,
                     hover_color=THEME["nav_hover"]
@@ -3060,7 +3700,6 @@ class InfinixGTToolkitApp:
             "telemetry": ("📊 System Telemetry Dashboard", "Real-time CPU, GPU, RAM, Disk I/O, Network, and battery infrastructure"),
             "gaming": ("🎮 Gaming Tools & Scenarios", "Windows Key Lock, game sensor, and 1-Click Game/Office profiles"),
             "battery": ("🔋 Battery Health & Power", "Smart 80% charge limiter, emergency saver, USB sleep charging, and AC automations"),
-            "presets": ("💾 Presets & Sharing", "User profile library, import/export, hardware diagnostics, and toolkit preferences"),
             "about": ("💻 About Device & Toolkit", "Battery health, system boot time & hardware specifications")
         }
         titles.update({
@@ -3070,13 +3709,12 @@ class InfinixGTToolkitApp:
             "telemetry": ("System monitor", "Live resource and battery readings"),
             "gaming": ("Gaming tools", "Focus controls and one-click scenarios"),
             "battery": ("Power & battery", "Power automation and supported charging controls"),
-            "presets": ("Profiles & settings", "Save your setup · Import and export profiles"),
             "about": ("About device & toolkit", "Live battery health, system boot time & hardware specifications")
         })
         t, st = titles.get(key, ("Dashboard", ""))
         split_titles = {"lighting": ("Lighting", " Studio"), "backzone": ("Rear light", " bar"),
                         "performance": ("Power &", " performance"), "telemetry": ("System", " monitor"),
-                        "presets": ("Profiles &", " settings"), "about": ("About device &", " toolkit")}
+                        "about": ("About device &", " toolkit")}
         leading, trailing = split_titles.get(key, (t, ""))
         self.page_title_lbl.configure(text=leading, text_color=THEME["text_primary"])
         self.page_title_suffix.configure(text=trailing)
@@ -3192,7 +3830,6 @@ class InfinixGTToolkitApp:
         self.pages["backzone"] = self._create_backzone_page()
         self.pages["performance"] = self._create_performance_page()
         self.pages["telemetry"] = self._create_telemetry_page()
-        self.pages["presets"] = self._create_presets_page()
         self.pages["about"] = self._create_about_page()
         self.root.after_idle(lambda: studio_ui.block_slider_mousewheel(self.root))
 
@@ -3239,7 +3876,7 @@ class InfinixGTToolkitApp:
                 border_width=2 if zid == "1" else 1,
                 border_color=THEME["accent_blue"] if zid == "1" else THEME["card_border"],
                 font=ctk.CTkFont(size=12, weight="bold"),
-                command=lambda z=zid: self._on_zone_clicked(z)
+                command=lambda z=zid: self._on_zone_clicked(z, switch_tab=True)
             )
             z_pill.pack(side="left", padx=5, fill="x", expand=True)
             self.zone_pill_buttons[zid] = z_pill
@@ -3254,7 +3891,7 @@ class InfinixGTToolkitApp:
         studio_ui.draw_keyboard(self)
         history_row = neon_ui.Frame(card_zones, fg_color="transparent")
         history_row.pack(fill="x", padx=18, pady=(0, 7))
-        ctk.CTkLabel(history_row, text="✣  Experiment freely – undo lighting changes this session.",
+        ctk.CTkLabel(history_row, text="LIVE 4-ZONE PREVIEW  ·  Undo changes anytime this session.",
                      fg_color=THEME["button_bg"], corner_radius=9, padx=12, pady=6,
                      text_color=THEME["text_secondary"], font=ctk.CTkFont(size=11)).pack(side="left")
         self.lighting_redo = neon_ui.Button(history_row, text="Redo", width=65, height=28,
@@ -3264,8 +3901,6 @@ class InfinixGTToolkitApp:
                                           command=lambda: self._move_lighting_history(-1))
         self.lighting_undo.pack(side="right")
         self._refresh_history_buttons()
-        ctk.CTkLabel(card_zones, text="LIVE 4-ZONE PREVIEW    ·    Click the illuminated keyboard areas to edit",
-                     font=ctk.CTkFont(size=11), text_color=THEME["text_muted"]).place(relx=.52, rely=.948, anchor="center")
 
         card_signature = neon_ui.Frame(scroll, fg_color=THEME["card_bg"], corner_radius=16,
                                       border_width=1, border_color=THEME["card_border"])
@@ -3385,8 +4020,8 @@ class InfinixGTToolkitApp:
             "RandomMorph": "Unexpected color blends", "BreathingPulse": "A gentle rise and fall",
             "ColorShift": "Smooth color transitions", "ScreenSync": "Match what is on screen",
             "ReactiveTyping": "Respond to each keystroke", "AudioSync": "Move with your music",
-            "MagneticSlingshot": "Collide, swap, and release", "ChromaticRelay": "Pass colour zone to zone",
-            "TimeFracture": "Freeze, rewind, fast-forward", "OrbitalEclipse": "Moving shadow and bright rim",
+            "MagneticSlingshot": "Twin ribbons cross and rebound", "ChromaticRelay": "Rich color flows between zones",
+            "TimeFracture": "Glide, suspend, rewind", "OrbitalEclipse": "Soft shadow, luminous edges",
         }
         effect_grid = neon_ui.Frame(card_fx, fg_color="transparent")
         effect_grid.pack(fill="x", padx=12, pady=(0, 6))
@@ -3877,7 +4512,7 @@ class InfinixGTToolkitApp:
             setattr(self, attr.replace("_var", "_switch"), control)
 
         modes = card("Performance mode")
-        label(modes, "Choose the balance you need. Display brightness is never changed by a performance mode.")
+        label(modes, "Choose the balance you need. Quiet mode activates Windows Energy Saver and lowers screen brightness by 5%.")
         self.mode_var = ctk.StringVar(value=self.config.get("power_mode", "Balanced"))
         current_mode_name = "Gaming" if self.mode_var.get() == "Beast" else self.mode_var.get()
         self.mode_display_var = ctk.StringVar(value=current_mode_name)
@@ -4017,9 +4652,163 @@ class InfinixGTToolkitApp:
         setting(auto, "emerg_saver_var", "emergency_battery_saver", "Low battery saver",
                 "Below 20%: Quiet mode and 10% keyboard brightness.", self._on_emergency_saver_toggled, True)
 
-        extras = section("Cooling & keyboard", "Fan boost, key controls and gaming alerts")
-        setting(extras, "cooler_var", "cooler_boost", "Maximum fan speed",
-                "Extra cooling with more fan noise.", self._on_cooler_boost_toggled)
+        # Dedicated Card: Dual Exhaust Fans & Live Speed Control
+        card_fan = neon_ui.Frame(scroll, fg_color=THEME["card_bg"], corner_radius=14,
+                                 border_width=1, border_color=THEME["card_border"])
+        card_fan.pack(fill="x", padx=4, pady=6)
+
+        # 1. Header Frame: Title & Live RPM Readout Badge
+        fan_head = neon_ui.Frame(card_fan, fg_color="transparent")
+        fan_head.pack(fill="x", padx=16, pady=(14, 6))
+        fan_title_box = neon_ui.Frame(fan_head, fg_color="transparent")
+        fan_title_box.pack(side="left")
+        ctk.CTkLabel(fan_title_box, text="🌪️ Exhaust Fan Speed Controls",
+                     font=ctk.CTkFont(size=16, weight="bold"),
+                     text_color=THEME["text_primary"]).pack(anchor="w")
+        ctk.CTkLabel(fan_title_box,
+                     text="Live tachometer RPM monitoring, precision duty cycle & dynamic curves",
+                     font=ctk.CTkFont(size=12), text_color=THEME["text_secondary"]).pack(anchor="w")
+
+        # Live RPM Badge on top right
+        self.fan_live_rpm_badge = ctk.CTkLabel(
+            fan_head,
+            text="⚡ Live: -- RPM",
+            font=ctk.CTkFont(size=13, weight="bold"),
+            text_color=THEME["accent_green"],
+            fg_color=THEME["card_sub_bg"],
+            corner_radius=8,
+            padx=10, pady=4
+        )
+        self.fan_live_rpm_badge.pack(side="right")
+
+        # Dual Fan Tachometer Chips Row
+        tacho_row = neon_ui.Frame(card_fan, fg_color="transparent")
+        tacho_row.pack(fill="x", padx=16, pady=(0, 10))
+
+        self.cpu_fan_rpm_chip = ctk.CTkLabel(
+            tacho_row, text="💻 CPU Fan: -- RPM",
+            font=ctk.CTkFont(size=12, weight="bold"),
+            text_color=THEME["accent_blue"],
+            fg_color=THEME["card_sub_bg"], corner_radius=6, padx=8, pady=3
+        )
+        self.cpu_fan_rpm_chip.pack(side="left", padx=(0, 8))
+
+        self.gpu_fan_rpm_chip = ctk.CTkLabel(
+            tacho_row, text="🎮 GPU Fan: -- RPM",
+            font=ctk.CTkFont(size=12, weight="bold"),
+            text_color=THEME["accent_purple"],
+            fg_color=THEME["card_sub_bg"], corner_radius=6, padx=8, pady=3
+        )
+        self.gpu_fan_rpm_chip.pack(side="left", padx=(0, 8))
+
+        self.fan_mode_chip = ctk.CTkLabel(
+            tacho_row,
+            text=f"● Manual Mode ({getattr(self, 'manual_fan_speed', 75)}%)" if getattr(self, 'fan_control_mode', 'auto') == "manual" else "● Dynamic Auto (EC Curve)",
+            font=ctk.CTkFont(size=12),
+            text_color=THEME["accent_green"] if getattr(self, 'fan_control_mode', 'auto') == "auto" else THEME["accent_amber"],
+            fg_color=THEME["card_sub_bg"], corner_radius=6, padx=8, pady=3
+        )
+        self.fan_mode_chip.pack(side="right")
+
+        # 2. Control Mode Switch: Dynamic Curve vs Manual Control
+        ctrl_mode_box = neon_ui.Frame(card_fan, fg_color=THEME["card_sub_bg"],
+                                     corner_radius=10, border_width=1, border_color=THEME["card_sub_border"])
+        ctrl_mode_box.pack(fill="x", padx=14, pady=(0, 10))
+
+        ctrl_inner = neon_ui.Frame(ctrl_mode_box, fg_color="transparent")
+        ctrl_inner.pack(fill="x", padx=12, pady=10)
+        ctrl_inner.grid_columnconfigure(0, weight=1)
+
+        c_text = ctk.CTkLabel(
+            ctrl_inner,
+            text="Exhaust Fan Control Mode\nDynamic Auto follows OEM thermal curves; Manual lets you set exact speed.",
+            anchor="w", justify="left", font=ctk.CTkFont(size=13), text_color=THEME["text_primary"]
+        )
+        c_text.grid(row=0, column=0, sticky="ew", padx=(0, 12))
+
+        self.fan_mode_var = ctk.StringVar(value="Dynamic Auto" if getattr(self, 'fan_control_mode', 'auto') == "auto" else "Manual Control")
+        self.fan_mode_selector = neon_ui.SegmentedButton(
+            ctrl_inner, values=["Dynamic Auto", "Manual Control"],
+            variable=self.fan_mode_var, command=self._on_fan_control_mode_changed,
+            height=34, selected_color=THEME["accent_blue"],
+            selected_hover_color=THEME["accent_purple"],
+            unselected_color=THEME["button_bg"],
+            unselected_hover_color=THEME["button_hover"]
+        )
+        self.fan_mode_selector.grid(row=0, column=1)
+
+        # 3. Manual Speed Slider Box
+        self.fan_slider_card = neon_ui.Frame(card_fan, fg_color=THEME["card_sub_bg"],
+                                            corner_radius=10, border_width=1, border_color=THEME["card_sub_border"])
+        self.fan_slider_card.pack(fill="x", padx=14, pady=(0, 10))
+
+        slider_lbl_row = neon_ui.Frame(self.fan_slider_card, fg_color="transparent")
+        slider_lbl_row.pack(fill="x", padx=14, pady=(10, 2))
+
+        ctk.CTkLabel(slider_lbl_row, text="Manual Fan Speed Target:", font=ctk.CTkFont(size=13, weight="bold"),
+                     text_color=THEME["text_primary"]).pack(side="left")
+        self.fan_slider_val_lbl = ctk.CTkLabel(
+            slider_lbl_row, text=f"{getattr(self, 'manual_fan_speed', 75)}%",
+            font=ctk.CTkFont(size=14, weight="bold"), text_color=THEME["accent_blue"]
+        )
+        self.fan_slider_val_lbl.pack(side="right")
+
+        self.fan_speed_var = ctk.IntVar(value=getattr(self, 'manual_fan_speed', 75))
+        self.fan_speed_slider = neon_ui.Slider(
+            self.fan_slider_card, from_=20, to=100, number_of_steps=80,
+            variable=self.fan_speed_var,
+            command=self._on_fan_slider_moving,
+            progress_color=THEME["accent_blue"], button_color=THEME["accent_blue"],
+            button_hover_color=THEME["accent_purple"], height=18
+        )
+        self.fan_speed_slider.pack(fill="x", padx=14, pady=(4, 10))
+        self.fan_speed_slider.bind("<ButtonRelease-1>", self._on_fan_slider_released)
+
+        # Quick Preset Buttons (40% Quiet, 70% Balance, 85% High, 100% Turbo)
+        preset_row = neon_ui.Frame(self.fan_slider_card, fg_color="transparent")
+        preset_row.pack(fill="x", padx=14, pady=(0, 12))
+        for c_idx in range(4):
+            preset_row.grid_columnconfigure(c_idx, weight=1, uniform="fan_preset")
+
+        presets = [("Quiet 40%", 40), ("Balance 70%", 70), ("High 85%", 85), ("Turbo 100%", 100)]
+        self.fan_preset_btns = {}
+        for idx, (p_text, p_val) in enumerate(presets):
+            is_cur = (getattr(self, 'manual_fan_speed', 75) == p_val)
+            btn = neon_ui.Button(
+                preset_row, text=p_text, height=30,
+                font=ctk.CTkFont(size=12, weight="bold" if is_cur else "normal"),
+                fg_color=THEME["button_bg"] if not is_cur else THEME["card_bg"],
+                hover_color=THEME["button_hover"],
+                text_color=THEME["accent_blue"] if is_cur else THEME["button_text"],
+                border_width=2 if is_cur else 1,
+                border_color=THEME["accent_blue"] if is_cur else THEME["card_border"],
+                corner_radius=8,
+                command=lambda val=p_val: self._apply_fan_preset(val)
+            )
+            btn.grid(row=0, column=idx, padx=3, sticky="ew")
+            self.fan_preset_btns[p_val] = btn
+
+        # Maximum Fan Speed (Cooler Boost) Toggle Row (synchronized)
+        boost_row = neon_ui.Frame(card_fan, fg_color="transparent")
+        boost_row.pack(fill="x", padx=16, pady=(0, 14))
+        boost_row.grid_columnconfigure(0, weight=1)
+        b_text = ctk.CTkLabel(
+            boost_row,
+            text="Maximum fan speed (Cooler Boost)\nForces both dual exhaust fans to maximum 100% RPM ceiling.",
+            anchor="w", justify="left",
+            font=ctk.CTkFont(size=13), text_color=THEME["text_primary"]
+        )
+        b_text.grid(row=0, column=0, sticky="ew", padx=(0, 12))
+        self.cooler_var = ctk.BooleanVar(value=self.config.get("cooler_boost", False))
+        self.cooler_switch = ctk.CTkSwitch(
+            boost_row, text="", width=42, variable=self.cooler_var,
+            command=self._on_cooler_boost_toggled,
+            progress_color=THEME["accent_blue"]
+        )
+        self.cooler_switch.grid(row=0, column=1)
+
+        # Keyboard & System Controls Section
+        extras = section("Keyboard & gaming controls", "Windows key lock, Fn lock and gaming alerts")
         setting(extras, "winlock_var", "win_key_lock", "Lock Windows key",
                 "Prevents accidental Start-menu presses.", self._on_winlock_toggled)
         setting(extras, "fnlock_var", "software_fn_lock", "Media keys without Fn",
@@ -4068,7 +4857,7 @@ class InfinixGTToolkitApp:
         self.telemetry_status_badge.pack(side="left")
 
         self.telemetry_cpu_temp_pill = ctk.CTkLabel(
-            status_row, text="💻 CPU: --°C",
+            status_row, text="CPU: --°C",
             font=ctk.CTkFont(size=12, weight="bold"),
             text_color=THEME["accent_blue"],
             fg_color=THEME["pill_bg"], corner_radius=8, padx=10, pady=6
@@ -4076,7 +4865,7 @@ class InfinixGTToolkitApp:
         self.telemetry_cpu_temp_pill.pack(side="left", padx=8)
 
         self.telemetry_gpu_temp_pill = ctk.CTkLabel(
-            status_row, text="🎮 GPU: --°C",
+            status_row, text="GPU: --°C",
             font=ctk.CTkFont(size=12, weight="bold"),
             text_color=THEME["accent_green"],
             fg_color=THEME["pill_bg"], corner_radius=8, padx=10, pady=6
@@ -4123,7 +4912,7 @@ class InfinixGTToolkitApp:
         )
         self.telemetry_gpu_mode_value.pack(side="left")
 
-        ctk.CTkLabel(right_info, text="Intel Core i5-13420H • RTX 4050 • 16\" 120Hz IPS",
+        ctk.CTkLabel(right_info, text="Live system readings",
                      font=ctk.CTkFont(size=11), text_color=THEME["text_muted"], anchor="e").pack(anchor="e", pady=(8, 0))
 
         # 2. TELEMETRY GRID (4 RICH UNIFIED HIGH-TECH CARDS)
@@ -4144,7 +4933,7 @@ class InfinixGTToolkitApp:
         c1_top.pack(fill="x", padx=14, pady=(10, 4))
         ctk.CTkLabel(c1_top, text="Processor (CPU)", image=neon_ui.icon('cpu'), compound='left', padx=10, font=ctk.CTkFont(size=15, weight="bold"),
                      text_color=THEME["text_secondary"]).pack(side="left")
-        ctk.CTkLabel(c1_top, text="LIVE (1s)", fg_color=THEME["pill_bg"], text_color=THEME["accent_green"],
+        ctk.CTkLabel(c1_top, text="LIVE", fg_color=THEME["pill_bg"], text_color=THEME["accent_green"],
                      font=ctk.CTkFont(size=11, weight="bold"), corner_radius=8, padx=8, pady=2).pack(side="right")
 
         # 2-Column Gauge & Stats Row
@@ -4171,7 +4960,7 @@ class InfinixGTToolkitApp:
                                           text_color=THEME["accent_blue"], fg_color=THEME["card_sub_bg"], corner_radius=6, padx=8, pady=2)
         self.cpu_temp_chip.pack(side="right")
 
-        self.cpu_pct_lbl = ctk.CTkLabel(c1_details, text="13th Gen Intel Core i5-13420H (8C/12T • 12MB Cache)",
+        self.cpu_pct_lbl = ctk.CTkLabel(c1_details, text="Detecting CPU…",
                                         font=ctk.CTkFont(size=12), text_color=THEME["text_muted"], anchor="w")
         self.cpu_pct_lbl.pack(fill="x", pady=(2, 4))
 
@@ -4184,7 +4973,7 @@ class InfinixGTToolkitApp:
         # Sparkline Section for CPU
         spark_frame = neon_ui.Frame(c1, fg_color="transparent")
         spark_frame.pack(fill="x", padx=14, pady=(2, 10))
-        ctk.CTkLabel(spark_frame, text="60-Second Real-Time Activity Sparkline:",
+        ctk.CTkLabel(spark_frame, text="Recent CPU activity:",
                      font=ctk.CTkFont(size=11, weight="bold"), text_color=THEME["text_muted"]).pack(anchor="w", pady=(0, 2))
         self.cpu_graph_canvas = tk.Canvas(spark_frame, height=76, bg="#071522", highlightthickness=1,
                                           highlightbackground=sub_border)
@@ -4226,7 +5015,7 @@ class InfinixGTToolkitApp:
                                           text_color=THEME["accent_green"], fg_color=THEME["card_sub_bg"], corner_radius=6, padx=8, pady=2)
         self.gpu_temp_chip.pack(side="right")
 
-        self.gpu_pct_lbl = ctk.CTkLabel(c2_details, text="Intel(R) UHD Graphics & NVIDIA RTX 4050",
+        self.gpu_pct_lbl = ctk.CTkLabel(c2_details, text="Detecting graphics devices…",
                                         font=ctk.CTkFont(size=12), text_color=THEME["text_muted"], anchor="w")
         self.gpu_pct_lbl.pack(fill="x", pady=(2, 4))
 
@@ -4239,7 +5028,7 @@ class InfinixGTToolkitApp:
         # Sparkline Section for GPU
         gpu_spark_frame = neon_ui.Frame(c2, fg_color="transparent")
         gpu_spark_frame.pack(fill="x", padx=14, pady=(2, 10))
-        ctk.CTkLabel(gpu_spark_frame, text="60-Second Real-Time GPU Activity Sparkline:",
+        ctk.CTkLabel(gpu_spark_frame, text="Recent GPU activity:",
                      font=ctk.CTkFont(size=11, weight="bold"), text_color=THEME["text_muted"]).pack(anchor="w", pady=(0, 2))
         self.gpu_graph_canvas = tk.Canvas(gpu_spark_frame, height=76, bg="#071522", highlightthickness=1,
                                           highlightbackground=sub_border)
@@ -4351,7 +5140,7 @@ class InfinixGTToolkitApp:
         self.telemetry_refresh_btn.pack(side="right")
 
         self.telemetry_bat_sub_lbl = ctk.CTkLabel(
-            bat_detail_box, text="Design: 70.0 Wh • Uptime: Detecting…",
+            bat_detail_box, text="Capacity: Detecting… • Uptime: Detecting…",
             font=ctk.CTkFont(size=12), text_color=THEME["text_muted"], anchor="w"
         )
         self.telemetry_bat_sub_lbl.pack(fill="x", padx=8, pady=(0, 4))
@@ -4372,17 +5161,17 @@ class InfinixGTToolkitApp:
 
         sensors = neon_ui.Frame(scroll,fg_color=THEME['card_bg'],corner_radius=14,border_width=1,border_color=THEME['card_border'])
         sensors.pack(fill='x',padx=4,pady=(6,10))
-        ctk.CTkLabel(sensors,text='Other sensors',image=neon_ui.icon('chip'),compound='left',padx=10,
+        ctk.CTkLabel(sensors,text='Sensor readings',image=neon_ui.icon('chip'),compound='left',padx=10,
                      font=ctk.CTkFont(size=15,weight='bold')).pack(anchor='w',padx=16,pady=(10,4))
         sensor_row=neon_ui.Frame(sensors,fg_color='transparent')
         sensor_row.pack(fill='x',padx=12,pady=(0,12))
         self.sensor_labels={}
-        for index,(key,title) in enumerate((('CPU','CPU Temperature'),('GPU','GPU Temperature'),('SSD','SSD Temperature'),('Ambient','Ambient Temperature'),('Fan','Fan Speed'))):
-            sensor_row.grid_columnconfigure(index,weight=1,uniform='sensors')
+        for index,(key,title) in enumerate((('CPU','CPU Temperature'),('GPU','GPU Temperature'),('SSD','Storage Temperature'),('Ambient','Ambient Temperature'),('Fan','Fan Speed'),('ACPI','ACPI Thermal Zone'))):
+            sensor_row.grid_columnconfigure(index % 3,weight=1,uniform='sensors')
             tile=neon_ui.Frame(sensor_row,fg_color=THEME['card_sub_bg'],border_width=1,border_color=THEME['card_sub_border'],corner_radius=10)
-            tile.grid(row=0,column=index,sticky='nsew',padx=4)
+            tile.grid(row=index // 3,column=index % 3,sticky='nsew',padx=4,pady=4)
             ctk.CTkLabel(tile,text=title,font=ctk.CTkFont(size=11),text_color=THEME['text_secondary']).pack(anchor='w',padx=12,pady=(8,0))
-            value=ctk.CTkLabel(tile,text='Not available',font=ctk.CTkFont(size=15,weight='bold'),text_color=THEME['accent_blue'])
+            value=ctk.CTkLabel(tile,text=telemetry_data.UNAVAILABLE,font=ctk.CTkFont(size=15,weight='bold'),text_color=THEME['accent_blue'],width=1,anchor='w',wraplength=180)
             value.pack(anchor='w',padx=12,pady=(0,10))
             self.sensor_labels[key]=value
 
@@ -4395,150 +5184,7 @@ class InfinixGTToolkitApp:
             self.telemetry_mode_value.configure(text=f"●  {current_mode}")
 
     # -----------------------------------------------------------------------
-    # PAGE 4: Gaming & Tools
-    # -----------------------------------------------------------------------
-    def _create_presets_page(self):
-        scroll = ctk.CTkScrollableFrame(self.main_container, fg_color="transparent")
-
-        # 1. Custom User Preset Manager Card
-        card_preset_mgr = neon_ui.Frame(scroll, fg_color=THEME["card_bg"], corner_radius=16, border_width=1, border_color=THEME["card_border"])
-        card_preset_mgr.pack(fill="x", padx=16, pady=(10, 6))
-
-        ctk.CTkLabel(card_preset_mgr, text="Your preset library", font=ctk.CTkFont(size=20, weight="bold"), text_color=THEME["text_primary"]).pack(anchor="w", padx=20, pady=(20, 2))
-        ctk.CTkLabel(card_preset_mgr, text="Save a lighting setup, then return to it with one click.", text_color=THEME["text_secondary"]).pack(anchor="w", padx=20, pady=(0, 18))
-
-        save_row = neon_ui.Frame(card_preset_mgr, fg_color="transparent")
-        save_row.pack(fill="x", padx=16, pady=(0, 8))
-
-        ctk.CTkLabel(save_row, text="Preset Name:", font=ctk.CTkFont(size=13, weight="bold"), text_color=THEME["text_secondary"]).pack(side="left", padx=(0, 6))
-
-        self.preset_name_entry = ctk.CTkEntry(save_row, width=220, height=40, placeholder_text="Name your setup", fg_color=THEME["entry_bg"], border_color=THEME["entry_border"], text_color=THEME["text_primary"])
-        self.preset_name_entry.pack(side="left", padx=4)
-        self.preset_name_entry.bind("<Return>", lambda event: self._save_user_preset())
-
-        save_btn = neon_ui.Button(
-            save_row, text="Save current setup", width=155, height=40,
-            fg_color=THEME["button_bg"], hover_color=THEME["button_hover"],
-            text_color=THEME["accent_blue"], border_width=1, border_color=THEME["card_border"],
-            corner_radius=8, font=ctk.CTkFont(size=13, weight="bold"),
-            command=self._save_user_preset
-        )
-        save_btn.pack(side="left", padx=6)
-
-        # Load Preset Dropdown
-        load_row = neon_ui.Frame(card_preset_mgr, fg_color="transparent")
-        load_row.pack(fill="x", padx=16, pady=(4, 8))
-
-        ctk.CTkLabel(load_row, text="Saved Presets:", font=ctk.CTkFont(size=13, weight="bold"), text_color=THEME["text_secondary"]).pack(side="left", padx=(0, 6))
-
-        user_presets_list = list(self.config.get("user_presets", {}).keys()) or ["No saved presets"]
-        self.preset_dropdown = ctk.CTkOptionMenu(
-            load_row, values=user_presets_list, width=220, height=40,
-            fg_color=THEME["entry_bg"], button_color=THEME["button_bg"], button_hover_color=THEME["button_hover"],
-            text_color=THEME["text_primary"], dropdown_fg_color=THEME["card_bg"],
-            dropdown_text_color=THEME["text_primary"], dropdown_hover_color=THEME["button_hover"]
-        )
-        self.preset_dropdown.pack(side="left", padx=4)
-
-        load_btn = neon_ui.Button(
-            load_row, text="📂 Load Preset", width=120, height=32,
-            fg_color=THEME["button_bg"], hover_color=THEME["button_hover"],
-            text_color=THEME["text_primary"], border_width=1, border_color=THEME["card_border"],
-            corner_radius=8, font=ctk.CTkFont(size=13, weight="bold"),
-            command=self._load_user_preset
-        )
-        load_btn.pack(side="left", padx=6)
-        rename_btn = neon_ui.Button(load_row, text="Rename", width=75, height=32,
-                       command=self._rename_user_preset)
-        rename_btn.pack(side="left", padx=4)
-        delete_btn = neon_ui.Button(load_row, text="Delete", width=65, height=32,
-                       command=self._delete_user_preset)
-        delete_btn.pack(side="left", padx=4)
-        self.preset_library_actions = (load_btn, rename_btn, delete_btn)
-        for button in self.preset_library_actions:
-            button.configure(state="normal" if self.config.get("user_presets") else "disabled")
-        self.preset_power_var = tk.BooleanVar(value=self.config.get("preset_include_power", False))
-        ctk.CTkCheckBox(card_preset_mgr, text="Also apply the preset's performance mode",
-                        variable=self.preset_power_var,
-                        command=lambda: self._set_user_preference("preset_include_power", self.preset_power_var.get())
-                        ).pack(anchor="w", padx=16, pady=(4, 6))
-        self.preset_status = ctk.CTkLabel(card_preset_mgr, text=("Select a preset to load it. To rename, enter a new name above." if self.config.get("user_presets") else "No presets yet. Name your current setup and save it, or import a preset below."),
-                                          text_color=THEME["text_secondary"], anchor="w", wraplength=550, justify="left")
-        self.preset_status.pack(fill="x", padx=16, pady=(0, 6))
-
-        # Export / Import Shareable Presets Row
-        share_row = neon_ui.Frame(card_preset_mgr, fg_color="transparent")
-        share_row.pack(fill="x", padx=16, pady=(4, 14))
-
-        exp_btn = neon_ui.Button(
-            share_row, text="📤 Export Preset File", width=155, height=32,
-            fg_color=THEME["button_bg"], hover_color=THEME["button_hover"],
-            text_color=THEME["accent_green"], border_width=1, border_color=THEME["card_border"],
-            corner_radius=8, font=ctk.CTkFont(size=13, weight="bold"),
-            command=self._export_preset_file
-        )
-        exp_btn.pack(side="left", padx=(0, 6))
-
-        imp_btn = neon_ui.Button(
-            share_row, text="📥 Import Preset File", width=155, height=32,
-            fg_color=THEME["button_bg"], hover_color=THEME["button_hover"],
-            text_color=THEME["accent_purple"], border_width=1, border_color=THEME["card_border"],
-            corner_radius=8, font=ctk.CTkFont(size=13, weight="bold"),
-            command=self._import_preset_file
-        )
-        imp_btn.pack(side="left", padx=6)
-
-        # 2. Windows Startup Card
-        card_start = neon_ui.Frame(scroll, fg_color=THEME["card_bg"], corner_radius=16, border_width=1, border_color=THEME["card_border"])
-        card_start.pack(fill="x", padx=16, pady=6)
-
-        self.start_var = ctk.BooleanVar(value=self.config.get("autostart", True))
-        start_switch = ctk.CTkSwitch(
-            card_start, text="Open toolkit when I sign in",
-            variable=self.start_var, command=self._on_autostart_toggled,
-            font=ctk.CTkFont(size=16, weight="bold"), progress_color=THEME["accent_blue"],
-            text_color=THEME["text_primary"]
-        )
-        start_switch.pack(anchor="w", padx=16, pady=(14, 4))
-
-        ctk.CTkLabel(
-            card_start,
-            text="Starts silently in the notification area and restores your saved settings after Windows sign-in.",
-            font=ctk.CTkFont(size=13), text_color=THEME["text_secondary"]
-        ).pack(anchor="w", padx=16, pady=(0, 14))
-
-        # 3. Hardware Info Card
-        close_row = neon_ui.Frame(card_start, fg_color="transparent")
-        close_row.pack(fill="x", padx=16, pady=(0, 14))
-        ctk.CTkLabel(close_row, text="When I close the window:").pack(side="left")
-        close_menu = ctk.CTkOptionMenu(close_row, values=["Keep running in tray", "Exit toolkit"],
-            command=lambda value: self._set_user_preference("close_to_tray", value == "Keep running in tray"))
-        close_menu.set("Keep running in tray" if self.config.get("close_to_tray", True) else "Exit toolkit")
-        close_menu.pack(side="left", padx=(24, 0))
-        ctk.CTkLabel(card_start, text="Exiting stops software lighting effects and automation.",
-                     text_color=THEME["text_secondary"]).pack(anchor="w", padx=16, pady=(0, 12))
-
-        card_diag = neon_ui.Frame(scroll, fg_color=THEME["card_bg"], corner_radius=16, border_width=1, border_color=THEME["card_border"])
-        card_diag.pack(fill="x", padx=16, pady=(6, 16))
-
-        ctk.CTkLabel(card_diag, text="Help & diagnostics", font=ctk.CTkFont(size=18, weight="bold"), text_color=THEME["text_primary"]).pack(anchor="w", padx=20, pady=(18, 6))
-
-        diag_text = (
-            "• Chassis: Infinix GT Book (Model GL613 / BYD N16 Motherboard)\n"
-            "• Processor: 13th Gen Intel(R) Core(TM) i5-13420H (12 Threads, 4.60 GHz)\n"
-            "• Display: 16-inch 120Hz IPS (1920x1200 16:10 Aspect Ratio)\n"
-            "• Keyboard Controller: USB VID 340E / PID 8002 (MI_01 HID Endpoint)\n"
-            "• Memory Footprint: ~15 MB RAM (0% CPU Idle Background Drain)\n"
-            "• Dual-Theme Engine: Dynamic Light (White) & Modern Dark Modes\n"
-            f"• Application Version: Infinix GT Toolkit v{APP_VERSION} ({BUILD_CHANNEL})"
-        )
-        ctk.CTkLabel(card_diag, text="Check hardware connectivity and current settings if something is not responding.", font=ctk.CTkFont(size=13), text_color=THEME["text_secondary"], justify="left").pack(anchor="w", padx=20, pady=(0, 12))
-        neon_ui.Button(card_diag, text="Run diagnostics  →", height=38, command=self._show_hardware_details).pack(anchor="w", padx=20, pady=(0, 18))
-
-        return scroll
-
-    # -----------------------------------------------------------------------
-    # PAGE 7: About Developer & Application (Yashman • India)
+    # About Developer & Application (Yashwant Mandal • Jharkhand, India)
     # -----------------------------------------------------------------------
     def _create_about_page(self):
         scroll = ctk.CTkScrollableFrame(self.main_container, fg_color="transparent")
@@ -4548,10 +5194,6 @@ class InfinixGTToolkitApp:
         card_dev.pack(fill="x", padx=4, pady=(8, 6))
         device_visual = neon_ui.Frame(card_dev, fg_color="transparent", width=290)
         device_visual.pack(side="right", fill="y", padx=18, pady=18)
-        if getattr(self, 'sidebar_laptop_image', None):
-            source = self.sidebar_laptop_image.cget('dark_image')
-            self.about_laptop_image = ctk.CTkImage(light_image=source, dark_image=source, size=(260, 168))
-            ctk.CTkLabel(device_visual, text="", image=self.about_laptop_image).pack(pady=(4, 12))
         ctk.CTkLabel(device_visual, text="GT BOOK · GL613", font=ctk.CTkFont(size=15, weight="bold"),
                      text_color=THEME['text_primary']).pack()
         def copy_specs():
@@ -4575,21 +5217,17 @@ class InfinixGTToolkitApp:
 
         name_row = neon_ui.Frame(d_info, fg_color="transparent")
         name_row.pack(anchor="w")
-        ctk.CTkLabel(name_row, text="Yashman", font=ctk.CTkFont(size=22, weight="bold"), text_color=THEME["text_primary"]).pack(side="left", padx=(0, 8))
-        ctk.CTkLabel(name_row, text="🇮🇳 INDIA", font=ctk.CTkFont(size=13, weight="bold"), text_color=THEME["accent_amber"], fg_color=THEME["pill_bg"], corner_radius=8, padx=8, pady=2).pack(side="left")
+        ctk.CTkLabel(name_row, text="Yashwant Mandal", font=ctk.CTkFont(size=22, weight="bold"), text_color=THEME["text_primary"]).pack(side="left", padx=(0, 8))
+        ctk.CTkLabel(d_info, text="Jharkhand, India", font=ctk.CTkFont(size=13), text_color=THEME["text_secondary"]).pack(anchor="w")
 
-        ctk.CTkLabel(d_info, text="Lead Developer & Hardware Systems Architect", font=ctk.CTkFont(size=14, weight="bold"), text_color=THEME["accent_blue"]).pack(anchor="w")
+        ctk.CTkLabel(d_info, text="Developer", font=ctk.CTkFont(size=14, weight="bold"), text_color=THEME["accent_blue"]).pack(anchor="w")
 
         bio_text = (
-            "Systems developer and hardware enthusiast based in India. Created the Infinix GT Toolkit "
-            "to liberate owners of the Infinix GT Book (Model GL613 / BYD N16 chassis) from clunky, resource-heavy OEM software.\n\n"
-            "By reverse-engineering the laptop's proprietary USB HID controller (VID 340E / PID 8002) and embedded controller (EC), "
-            "this toolkit provides native 45 FPS custom lighting, autonomous workload scaling, and permanently eliminates the notorious "
-            "10-second backlight auto-sleep timeout—all while running with zero background overhead and an ultra-lightweight ~15MB RAM footprint."
+            "Keyboard lighting, rear light controls, performance modes and system monitoring "
+            "in one community-developed Windows app for Infinix GT Book owners."
         )
-        bio = ctk.CTkLabel(developer_body, text=bio_text, font=ctk.CTkFont(size=13), text_color=THEME["text_secondary"], justify="left", wraplength=630)
+        bio = ctk.CTkLabel(developer_body, text=bio_text, width=1, anchor="w", font=ctk.CTkFont(size=13), text_color=THEME["text_secondary"], justify="left", wraplength=320)
         bio.pack(fill='x', padx=22, pady=(6, 16))
-        bio.bind('<Configure>', lambda e: bio.configure(wraplength=max(250,e.width-8)))
 
         # ══════════════════════════════════════════════════════════════════
         # LIVE SYSTEM STATUS CARD
@@ -4612,19 +5250,20 @@ class InfinixGTToolkitApp:
         live_grid = neon_ui.Frame(card_live, fg_color="transparent")
         live_grid.pack(fill="x", padx=16, pady=(0, 14))
         live_grid.columnconfigure((0,1,2,3), weight=1, uniform='live')
+        live_tiles = []
 
         def _live_tile(parent, row, col, icon, label, accent):
             index = row * 2 + col
             row, col = divmod(index, 4)
             tile = neon_ui.Frame(parent, fg_color=THEME["card_sub_bg"], corner_radius=10, border_width=1, border_color=THEME["card_sub_border"])
             tile.grid(row=row, column=col, padx=4, pady=4, sticky="nsew")
+            live_tiles.append(tile)
             top = neon_ui.Frame(tile, fg_color="transparent")
             top.pack(anchor="w", padx=10, pady=(8, 2))
             ctk.CTkLabel(top, text=icon, font=ctk.CTkFont(size=18)).pack(side="left", padx=(0, 6))
             ctk.CTkLabel(top, text=label, font=ctk.CTkFont(size=12, weight="bold"), text_color=THEME["text_muted"]).pack(side="left")
-            val_lbl = ctk.CTkLabel(tile, text="Loading…", font=ctk.CTkFont(size=15, weight="bold"), text_color=accent, justify='left', anchor='w', wraplength=240)
+            val_lbl = ctk.CTkLabel(tile, text="Loading…", font=ctk.CTkFont(size=15, weight="bold"), text_color=accent, justify='left', anchor='w', wraplength=200, width=1)
             val_lbl.pack(fill='x', padx=14, pady=(5, 16))
-            val_lbl.bind('<Configure>', lambda e: val_lbl.configure(wraplength=max(120,e.width-4)))
             return val_lbl
 
         self._about_live_labels = {}
@@ -4633,15 +5272,28 @@ class InfinixGTToolkitApp:
         self._about_live_labels["bat_status"] = _live_tile(live_grid, 1, 0, "🔌", "Power Status",      THEME["accent_amber"])
         self._about_live_labels["bat_cycles"] = _live_tile(live_grid, 1, 1, "🔁", "Charge Cycles",     THEME["accent_purple"])
         self._about_live_labels["bat_cap"]    = _live_tile(live_grid, 2, 0, "📦", "Full / Design Cap", THEME["accent_cyan"])
-        self._about_live_labels["bat_age"]    = _live_tile(live_grid, 2, 1, "📅", "Battery Age Est.",  THEME["accent_rose"])
+        self._about_live_labels["bat_wear"]    = _live_tile(live_grid, 2, 1, "📅", "Capacity Loss",  THEME["accent_rose"])
         self._about_live_labels["boot_time"]  = _live_tile(live_grid, 3, 0, "🚀", "Last Boot Time",    THEME["accent_blue"])
         self._about_live_labels["uptime"]     = _live_tile(live_grid, 3, 1, "⏱️", "System Uptime",     THEME["accent_green"])
         self._about_live_labels["ram_used"]   = _live_tile(live_grid, 4, 0, "🧠", "RAM Usage",         THEME["accent_cyan"])
         self._about_live_labels["cpu_temp"]   = _live_tile(live_grid, 4, 1, "🌡️", "CPU Temperature",   THEME["accent_rose"])
         self._about_live_labels['gpu_temp'] = _live_tile(live_grid, 5, 0, '◈', 'GPU Temperature', THEME['accent_cyan'])
-        self._about_live_labels['gpu_temp'].configure(text='N/A · Sensor not available')
+        self._about_live_labels['gpu_temp'].configure(text=telemetry_data.UNAVAILABLE)
         self._about_live_labels['fan_speed'] = _live_tile(live_grid, 5, 1, '◌', 'Fan Speed', THEME['accent_purple'])
-        self._about_live_labels['fan_speed'].configure(text='N/A · Sensor not available')
+        self._about_live_labels['fan_speed'].configure(text=telemetry_data.UNAVAILABLE)
+
+        live_columns = [4]
+        def fit_live_tiles(event):
+            columns = 4 if event.width / live_grid._get_widget_scaling() >= 960 else 2
+            if columns == live_columns[0]:
+                return
+            live_columns[0] = columns
+            for index in range(4):
+                live_grid.grid_columnconfigure(index, weight=1 if index < columns else 0,
+                                                uniform="live" if index < columns else "", minsize=0)
+            for index, tile in enumerate(live_tiles):
+                tile.grid_configure(row=index // columns, column=index % columns)
+        live_grid.bind("<Configure>", fit_live_tiles)
 
         # ══════════════════════════════════════════════════════════════════
         # STATIC DEVICE INFO CARD
@@ -4708,7 +5360,7 @@ class InfinixGTToolkitApp:
         # Footer
         card_foot = neon_ui.Frame(scroll, fg_color="transparent")
         card_foot.pack(fill="x", padx=16, pady=(12, 24))
-        ctk.CTkLabel(card_foot, text="❤️ Crafted with dedication by Yashman in India • Built for the global Infinix GT Book community",
+        ctk.CTkLabel(card_foot, text="Yashwant Mandal · Jharkhand, India",
                      font=ctk.CTkFont(size=14, weight="bold"), text_color=THEME["accent_blue"]).pack(anchor="center")
 
         # Kick off async data fetch
@@ -4722,12 +5374,46 @@ class InfinixGTToolkitApp:
     # -----------------------------------------------------------------------
     def _about_refresh_live(self, silent=False):
         """Spawn background thread to collect live system stats, then update UI."""
+        if getattr(self, "_about_live_pending", False):
+            return
+        self._about_live_pending = True
         if not silent:
             if hasattr(self, "_about_refresh_btn") and self._about_refresh_btn.winfo_exists():
                 self._about_refresh_btn.configure(state="disabled", text="⏳ Loading…")
             if hasattr(self, "telemetry_refresh_btn") and self.telemetry_refresh_btn.winfo_exists():
                 self.telemetry_refresh_btn.configure(state="disabled", text="⏳ …")
         threading.Thread(target=self._about_collect_live, daemon=True).start()
+
+    def _apply_sensor_readings(self, readings):
+        """Use the same readings and formatting on every monitoring surface."""
+        if not isinstance(readings, dict):
+            readings = getattr(self, "_sensor_readings", {})
+        self._sensor_readings = {key: telemetry_data.number(
+            readings.get(key), 0, 20000 if key == "Fan" else 125)
+            for key in telemetry_data.SENSOR_KEYS}
+        self.cpu_temp_val = self._sensor_readings["CPU"] or self._sensor_readings.get("ACPI")
+        self.gpu_temp_val = self._sensor_readings["GPU"]
+        for key, value in self._sensor_readings.items():
+            label = getattr(self, "sensor_labels", {}).get(key)
+            if label is not None and label.winfo_exists():
+                label.configure(text=telemetry_data.sensor_text(key, value))
+            about_key = {"CPU": "cpu_temp", "GPU": "gpu_temp", "Fan": "fan_speed"}.get(key)
+            label = getattr(self, "_about_live_labels", {}).get(about_key)
+            if label is not None and label.winfo_exists():
+                label.configure(text=telemetry_data.sensor_text(key, value))
+
+    def _update_about_fast_stats(self, ram_used, ram_total, ram_percent, charge, plugged):
+        values = {"ram_used": f"{ram_used:.1f} GiB / {ram_total:.1f} GiB ({ram_percent:.1f}%)",
+                  "bat_charge": f"{charge:.0f}%" if charge is not None else telemetry_data.UNAVAILABLE,
+                  "bat_status": telemetry_data.power_text(charge, plugged)}
+        try:
+            values["uptime"] = telemetry_data.uptime_text(psutil.boot_time())
+        except Exception:
+            values["uptime"] = telemetry_data.UNAVAILABLE
+        for key, text in values.items():
+            label = getattr(self, "_about_live_labels", {}).get(key)
+            if label is not None and label.winfo_exists():
+                label.configure(text=text)
 
     def _about_collect_live(self):
         """Worker: collect live battery/uptime/RAM/temp data (off-main-thread)."""
@@ -4794,7 +5480,7 @@ class InfinixGTToolkitApp:
                                     design_cap = int(txt)
                                 elif tag_name == "FullChargeCapacity" and txt.isdigit() and int(txt) > 0 and full_cap is None:
                                     full_cap = int(txt)
-                                elif tag_name == "CycleCount" and txt.isdigit() and int(txt) > 0 and cycles is None:
+                                elif tag_name == "CycleCount" and txt.isdigit() and int(txt) >= 0 and cycles is None:
                                     cycles = int(txt)
                             try:
                                 os.remove(tmp_xml)
@@ -4803,39 +5489,25 @@ class InfinixGTToolkitApp:
                     except Exception:
                         pass
 
-                if full_cap and design_cap and design_cap > 0:
-                    health = round(full_cap / design_cap * 100, 1)
-                    result["bat_health"] = f"{health}%"
-                    result["bat_health_pct"] = health
-                    degraded = max(0, design_cap - full_cap)
-                    est_years = round(degraded / 8000, 1) if degraded > 0 else 0
-                    result["bat_age"] = f"~{est_years} yr wear" if est_years > 0 else "< 1 yr (new)"
-                    result["bat_cap"] = f"{round(full_cap/1000,1)} Wh / {round(design_cap/1000,1)} Wh"
-                else:
-                    result["bat_health"] = "N/A"
-                    result["bat_health_pct"] = None
-                    result["bat_age"] = "N/A"
-                    result["bat_cap"] = "N/A"
-
-                result["bat_cycles"] = f"{cycles} cycles" if (cycles and cycles > 0) else "Not reported by EC"
+                result.update(telemetry_data.battery_capacity(full_cap, design_cap, cycles))
                 STATUS_MAP = {1:"Discharging", 2:"AC Power (Plugged)", 3:"Fully Charged",
                               4:"Low", 5:"Critical", 6:"Charging", 7:"Charging & High",
                               8:"Charging & Low", 9:"Charging & Critical", 11:"Partially Charged"}
-                result["bat_status"] = STATUS_MAP.get(status_code, f"Connected (Code {status_code})")
+                result["bat_status"] = STATUS_MAP.get(status_code, telemetry_data.UNAVAILABLE)
             except Exception:
-                for k in ("bat_health","bat_age","bat_cap","bat_cycles","bat_status"):
+                for k in ("bat_health","bat_wear","bat_cap","bat_cycles","bat_status"):
                     result[k] = "WMI error"
             finally:
-                gc.collect()
                 pythoncom.CoUninitialize()
         except Exception:
-            for k in ("bat_health","bat_age","bat_cap","bat_cycles","bat_status"):
+            for k in ("bat_health","bat_wear","bat_cap","bat_cycles","bat_status"):
                 result[k] = "Error"
 
         # ── Current charge % via psutil ───────────────────────────────────
         try:
             bat = psutil.sensors_battery()
-            result["bat_charge"] = f"{round(bat.percent, 1)}%" if bat else "N/A"
+            result["bat_charge"] = f"{bat.percent:.0f}%" if bat else telemetry_data.UNAVAILABLE
+            result["bat_status"] = telemetry_data.power_text(bat.percent, bat.power_plugged) if bat else telemetry_data.UNAVAILABLE
         except Exception:
             result["bat_charge"] = "Error"
 
@@ -4860,22 +5532,22 @@ class InfinixGTToolkitApp:
         # ── RAM ───────────────────────────────────────────────────────────
         try:
             vm = psutil.virtual_memory()
-            result["ram_used"] = f"{round(vm.used/(1024**3),1)} GB / {round(vm.total/(1024**3),1)} GB ({vm.percent}%)"
+            result["ram_used"] = f"{vm.used/(1024**3):.1f} GiB / {vm.total/(1024**3):.1f} GiB ({vm.percent:.1f}%)"
         except Exception:
             result["ram_used"] = "Error"
 
-        # ── CPU temperature ───────────────────────────────────────────────
+        # Refresh through the same cached, read-only source used by System monitor.
         try:
-            temps = self._hardware.get_temperature_readings() if hasattr(self, "_hardware") else {}
-            cpu_t = temps.get("CPU")
-            result["cpu_temp"] = f"{cpu_t:.0f} °C" if cpu_t is not None else "N/A"
+            result["sensors"] = HardwareEngine.get_temperature_readings()
         except Exception:
-            result["cpu_temp"] = "Error"
+            result["sensors"] = dict.fromkeys(telemetry_data.SENSOR_KEYS)
 
         self._ui_dispatch(self._about_apply_live, result)
 
     def _about_apply_live(self, result: dict):
         """Apply collected live stats to About labels (UI thread)."""
+        self._about_live_pending = False
+        self._apply_sensor_readings(result.get("sensors"))
         for key, text in result.items():
             lbl = getattr(self, "_about_live_labels", {}).get(key)
             if lbl and lbl.winfo_exists():
@@ -4890,21 +5562,14 @@ class InfinixGTToolkitApp:
         uptime_val = result.get("uptime", "N/A")
         boot_val = result.get("boot_time", "N/A")
 
-        h_color = THEME["accent_green"]
-        hp_num = None
-        try:
-            hp_num = float(result.get("bat_health_pct", 80))
-            if hp_num < 60:
-                h_color = THEME["accent_rose"]
-            elif hp_num < 75:
-                h_color = THEME["accent_amber"]
-        except Exception:
-            pass
+        hp_num = telemetry_data.number(result.get("bat_health_pct"), 0, 200)
+        h_color = (THEME["text_muted"] if hp_num is None else THEME["accent_rose"]
+                   if hp_num < 60 else THEME["accent_amber"] if hp_num < 80 else THEME["accent_green"])
 
         self._cached_bat_health = health_p
-        if hp_num is not None:
-            self._cached_bat_health_pct = hp_num
-            self.config["cached_bat_health_pct"] = hp_num
+        self._cached_bat_health_pct = hp_num
+        self.config["cached_bat_health_pct"] = hp_num
+        self._cached_cap_info = cap_val
 
         self._cached_bat_summary = f"🔋 Health: {health_p} • 📦 {cap_val} • ⏱️ Uptime: {uptime_val}"
 
@@ -4913,8 +5578,7 @@ class InfinixGTToolkitApp:
             if "Battery:" in cur_txt:
                 prefix = cur_txt.split(" • Health:")[0]
                 h_disp = f"{hp_num:.1f}%" if (hp_num is not None and hp_num % 1 != 0) else (f"{int(hp_num)}%" if hp_num is not None else health_p)
-                if h_disp not in ("N/A", "Error", "WMI error", "Detecting…"):
-                    self.side_bat_lbl.configure(text=f"{prefix} • Health: {h_disp}")
+                self.side_bat_lbl.configure(text=f"{prefix} • Health: {h_disp}" if hp_num is not None else prefix)
 
         # Auto-renew battery health every 30 seconds in background
         if hasattr(self, 'root') and self.root and self.root.winfo_exists():
@@ -4926,7 +5590,7 @@ class InfinixGTToolkitApp:
             self._bat_renew_job = self.root.after(30000, lambda: self._about_refresh_live(silent=True))
 
         if hasattr(self, 'telemetry_bat_health_badge') and self.telemetry_bat_health_badge.winfo_exists():
-            rating = " (Good)" if health_p not in ("N/A", "Error") else ""
+            rating = "" if hp_num is None else " (Good)" if hp_num >= 80 else " (Reduced)"
             self.telemetry_bat_health_badge.configure(
                 text=f"🔋 Battery Health: {health_p}{rating}",
                 text_color=h_color
@@ -4971,19 +5635,7 @@ class InfinixGTToolkitApp:
                     lines = []
                     for g in gpus:
                         name = (g.Name or "Unknown").strip()
-                        try:
-                            aram = int(g.AdapterRAM)
-                            if aram > 0:
-                                vram = round(aram / (1024**3), 1)
-                                lines.append(f"{name} ({vram} GB)")
-                            elif "4050" in name:
-                                lines.append(f"{name} (6 GB GDDR6)")
-                            elif "Intel" in name or "UHD" in name:
-                                lines.append(f"{name} (Shared Display Pipeline)")
-                            else:
-                                lines.append(name)
-                        except Exception:
-                            lines.append(name)
+                        lines.append(name)
                     result["gpu"] = "\n".join(lines) if lines else "N/A"
                 except Exception:
                     result["gpu"] = "Error"
@@ -4992,11 +5644,10 @@ class InfinixGTToolkitApp:
                     cs = list(svc.ExecQuery("SELECT TotalPhysicalMemory FROM Win32_ComputerSystem"))
                     sticks = list(svc.ExecQuery("SELECT Capacity,Speed FROM Win32_PhysicalMemory"))
                     total_gb = round(int(cs[0].TotalPhysicalMemory)/(1024**3),1) if cs else "?"
-                    if sticks:
-                        spd = sticks[0].Speed or 6400
-                        result["ram"] = f"{total_gb} GB LPDDR5 Dual-Channel\n{len(sticks)}x 2GB @ {spd} MHz"
-                    else:
-                        result["ram"] = f"{total_gb} GB"
+                    modules = [f"{int(stick.Capacity) / (1024**3):g} GiB" for stick in sticks if int(stick.Capacity or 0) > 0]
+                    result["ram"] = f"{total_gb} GiB usable"
+                    if modules:
+                        result["ram"] += "\nModules: " + " + ".join(modules)
                 except Exception:
                     result["ram"] = "Error"
 
@@ -5040,7 +5691,6 @@ class InfinixGTToolkitApp:
                 for k in ("cpu","gpu","ram","os","disk","bios"):
                     result.setdefault(k, "WMI error")
             finally:
-                gc.collect()
                 pythoncom.CoUninitialize()
         except Exception:
             for k in ("cpu","gpu","ram","os","disk","bios"):
@@ -5054,6 +5704,8 @@ class InfinixGTToolkitApp:
 
     def _about_apply_static(self, result: dict):
         """Apply static device info to labels (UI thread)."""
+        self._device_cpu_text = result.get("cpu", "CPU not reported").replace("\n", " · ")
+        self._device_gpu_text = result.get("gpu", "GPU not reported").replace("\n", " · ")
         for key, text in result.items():
             lbl = getattr(self, "_about_static_labels", {}).get(key)
             if lbl and lbl.winfo_exists():
@@ -5139,9 +5791,9 @@ class InfinixGTToolkitApp:
         self._update_zone_buttons_ui()
         self._apply_lighting_hardware()
 
-    def _on_zone_clicked(self, zid: str):
+    def _on_zone_clicked(self, zid: str, switch_tab: bool = False):
         self.selected_zone = zid
-        if hasattr(self, "studio_sections"):
+        if switch_tab and hasattr(self, "studio_sections"):
             self._show_studio_section("Zone color")
         zone_names = {"1": "WASD Gaming", "2": "Center Alpha", "3": "Right / Arrows", "4": "Full Numpad"}
         
@@ -6045,7 +6697,7 @@ class InfinixGTToolkitApp:
 
         self._save_config()
         self._update_zone_buttons_ui()
-        self._on_zone_clicked(getattr(self, 'selected_zone', "1"))
+        self._on_zone_clicked(getattr(self, 'selected_zone', "1"), switch_tab=False)
         self._apply_lighting_hardware()
 
     def _crossfade_zone_combo(self, target_czones: dict):
@@ -6054,7 +6706,7 @@ class InfinixGTToolkitApp:
         self.config["zones"] = self.zones
         self._save_config()
         self._update_zone_buttons_ui()
-        self._on_zone_clicked(self.selected_zone)
+        self._on_zone_clicked(self.selected_zone, switch_tab=False)
         self._apply_lighting_hardware()
 
     def _update_theme_buttons_ui(self):
@@ -6380,6 +7032,12 @@ class InfinixGTToolkitApp:
                 self._record_automation_event(f"Manual control for {minutes} min", mode)
             self._save_config()
             self._set_mode_apply_status(f"●  {display_mode} mode active", THEME["accent_green"])
+            if hasattr(self, "_show_mode_osd"):
+                self._show_mode_osd(mode)
+            try:
+                HardwareEngine.set_windows_power_plan(mode)
+            except Exception:
+                pass
         else:
             self.mode_var.set(previous_mode)
             previous_display = "Gaming" if previous_mode == "Beast" else previous_mode
@@ -6491,6 +7149,19 @@ class InfinixGTToolkitApp:
 
     def _on_cooler_boost_toggled(self):
         val = self.cooler_var.get()
+        self.fan_control_mode = "manual" if val else "auto"
+        self.config["fan_control_mode"] = self.fan_control_mode
+        if hasattr(self, "fan_mode_var"):
+            self.fan_mode_var.set("Manual Control" if val else "Dynamic Auto")
+        self.manual_fan_speed = 100 if val else 75
+        if hasattr(self, "fan_speed_var"):
+            self.fan_speed_var.set(self.manual_fan_speed)
+        if hasattr(self, "fan_speed_slider") and self.fan_speed_slider.winfo_exists():
+            self.fan_speed_slider.set(self.manual_fan_speed)
+        if hasattr(self, "fan_slider_val_lbl") and self.fan_slider_val_lbl.winfo_exists():
+            self.fan_slider_val_lbl.configure(text=f"{self.manual_fan_speed}%")
+        self._update_fan_chips_ui()
+
         if hasattr(self, "cooler_switch"):
             self.cooler_switch.configure(state="disabled")
         accepted = InfinixGTToolkitApp._submit_hardware_command(self,
@@ -6595,178 +7266,11 @@ class InfinixGTToolkitApp:
         self.usb_chg_var.set(val)
         self._on_usb_charge_toggled()
 
-    # -----------------------------------------------------------------------
-    # User Custom Presets Library
-    # -----------------------------------------------------------------------
-    def _set_user_preference(self, key, value):
-        self.config[key] = value
-        self._save_config()
-
-    def _preset_feedback(self, text):
-        self.preset_status.configure(text=text)
-        for button in getattr(self, "preset_library_actions", ()):
-            button.configure(state="normal" if self.config.get("user_presets") else "disabled")
-
-    def _rename_user_preset(self):
-        old_name = self.preset_dropdown.get()
-        new_name = self.preset_name_entry.get().strip()
-        presets = self.config.get("user_presets", {})
-        if old_name not in presets:
-            self._preset_feedback("Select a saved preset first.")
-            return
-        if not new_name or len(new_name) > 60:
-            self._preset_feedback("Enter a new name (1–60 characters) in Preset Name.")
-            return
-        if new_name in presets and new_name != old_name:
-            self._preset_feedback("That name already exists. Choose a different name.")
-            return
-        if new_name != old_name:
-            presets[new_name] = presets.pop(old_name)
-            self._save_config()
-            self.preset_dropdown.configure(values=list(presets))
-            self.preset_dropdown.set(new_name)
-        self._preset_feedback(f"Renamed to {new_name}.")
-
-    def _delete_user_preset(self):
-        name = self.preset_dropdown.get()
-        presets = self.config.get("user_presets", {})
-        if name not in presets:
-            self._preset_feedback("Select a saved preset first.")
-            return
-        if not messagebox.askyesno("Delete preset?", f"Remove '{name}' from your library? Current lighting stays as it is."):
-            return
-        del presets[name]
-        self._save_config()
-        names = list(presets) or ["No saved presets"]
-        self.preset_dropdown.configure(values=names)
-        self.preset_dropdown.set(names[0])
-        self._preset_feedback(f"Deleted {name}.")
-
-    def _save_user_preset(self):
-        name = self.preset_name_entry.get().strip()
-        if not name or len(name) > 60:
-            self._preset_feedback("Enter a preset name (1–60 characters).")
-            return
-        presets = self.config.get("user_presets", {})
-        if name in presets and not messagebox.askyesno("Replace preset?", f"Replace existing preset '{name}'?"):
-            return
-        presets[name] = {
-            "zones": {k: list(v) for k, v in self.zones.items()},
-            "brightness": self.brightness,
-            "effect_mode": self.effect_mode,
-            "animation_speed": self.anim_speed,
-            "animation_direction": self.anim_direction,
-            "power_mode": self.mode_var.get()
-        }
-        self.config["user_presets"] = presets
-        self._save_config()
-        self.preset_dropdown.configure(values=list(presets.keys()))
-        self.preset_dropdown.set(name)
-        self._preset_feedback(f"Saved {name}.")
-
-    def _load_user_preset(self):
-        name = self.preset_dropdown.get()
-        presets = self.config.get("user_presets", {})
-        if name in presets:
-            try:
-                p = validate_lighting_preset(presets[name])
-            except ValueError as exc:
-                messagebox.showerror("Invalid preset", str(exc))
-                return
-            self.zones = {k: list(v) for k, v in p.get("zones", self.zones).items()}
-            self.config["zones"] = self.zones
-            self.current_color = list(self.zones["1"])
-            self.config["current_color"] = self.current_color
-            self.brightness = p.get("brightness", 100)
-            self.config["brightness"] = self.brightness
-            self.bright_slider.set(self.brightness)
-            self.bright_lbl.configure(text=f"{self.brightness}%")
-            self._refresh_brightness_buttons()
-            if self.config.get("preset_include_power", False):
-                self.mode_var.set(p.get("power_mode", "Balanced"))
-                self._on_mode_selected()
-            self.effect_mode = p.get("effect_mode", self.effect_mode)
-            self.effect_var.set(self.effect_mode)
-            self.config["effect_mode"] = self.effect_mode
-            self.current_theme = ""
-            self.config["current_theme"] = ""
-            self.anim_speed = p["animation_speed"]
-            self.anim_direction = normalize_animation_direction(p["animation_direction"])
-            self.speed_var.set(self.anim_speed)
-            self.direction_var.set(self.anim_direction)
-            self.config["animation_speed"] = self.anim_speed
-            self.config["animation_direction"] = self.anim_direction
-            self._update_fx_status_ui()
-            self._save_config()
-            self._update_zone_buttons_ui()
-            self._update_theme_buttons_ui()
-            self._anim_step_reset = True
-            self._apply_lighting_hardware()
-            self._preset_feedback(f"Loaded {name}. Lighting changes can be undone in Lighting studio.")
-
     def _on_emergency_saver_toggled(self):
         val = self.emerg_saver_var.get()
         self.config["emergency_battery_saver"] = val
         self.emergency_saver_active = val
         self._save_config()
-
-    def _export_preset_file(self):
-        """Exports currently loaded preset or zones to a shareable .igtkpreset JSON file."""
-        from tkinter import filedialog
-        file_path = filedialog.asksaveasfilename(
-            title="Export Infinix GT Preset",
-            defaultextension=".igtkpreset",
-            filetypes=[("Infinix GT Preset (*.igtkpreset)", "*.igtkpreset"), ("JSON Files (*.json)", "*.json")]
-        )
-        if not file_path:
-            return
-        p_name = self.preset_name_entry.get().strip() or "Custom Setup"
-        data = {
-            "version": "4.2",
-            "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
-            "preset_name": p_name,
-            "zones": self.zones,
-            "brightness": self.brightness,
-            "effect_mode": self.effect_mode,
-            "animation_speed": self.anim_speed,
-            "animation_direction": self.anim_direction,
-            "power_mode": self.mode_var.get()
-        }
-        try:
-            with open(file_path, "w", encoding="utf-8") as f:
-                json.dump(data, f, indent=2)
-            messagebox.showinfo("Preset Exported", f"Successfully exported preset to:\n{file_path}")
-        except Exception as e:
-            messagebox.showerror("Export Failed", f"Could not save preset file: {e}")
-
-    def _import_preset_file(self):
-        """Imports a .igtkpreset file into the user's custom presets library."""
-        from tkinter import filedialog
-        file_path = filedialog.askopenfilename(
-            title="Import Infinix GT Preset",
-            filetypes=[("Infinix GT Preset (*.igtkpreset)", "*.igtkpreset"), ("JSON Files (*.json)", "*.json")]
-        )
-        if not file_path:
-            return
-        try:
-            with open(file_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            validated = validate_lighting_preset(data)
-            name = data.get("preset_name", os.path.splitext(os.path.basename(file_path))[0])
-            if not isinstance(name, str) or not name.strip():
-                raise ValueError("Preset name must be non-empty text.")
-            presets = self.config.get("user_presets", {})
-            if name in presets and not messagebox.askyesno("Replace preset?", f"Replace existing preset '{name}'?"):
-                return
-            presets[name] = validated
-            self.config["user_presets"] = presets
-            self._save_config()
-            self.preset_dropdown.configure(values=list(presets.keys()))
-            self.preset_dropdown.set(name)
-            self._preset_feedback(f"Imported {name}. Click Load Preset to apply it.")
-        except Exception as e:
-            messagebox.showerror("Import Failed", f"Could not parse preset file: {e}")
-
     def _toggle_mini_overlay(self):
         """Toggles the sleek, floating always-on-top desktop HUD."""
         if getattr(self, 'hud_window', None) is not None and self.hud_window.winfo_exists():
@@ -6815,7 +7319,7 @@ class InfinixGTToolkitApp:
         )
         exp_btn.pack(side="right")
 
-        self.hud_cpu_lbl = ctk.CTkLabel(hud_frame, text="💻 CPU: --%  |  🧠 RAM: --%", font=ctk.CTkFont(size=13, weight="bold"), text_color="#F8FAFC")
+        self.hud_cpu_lbl = ctk.CTkLabel(hud_frame, text="CPU: --%  |  RAM: --%", font=ctk.CTkFont(size=13, weight="bold"), text_color="#F8FAFC")
         self.hud_cpu_lbl.pack(anchor="w", padx=12, pady=1)
 
         self.hud_bat_lbl = ctk.CTkLabel(hud_frame, text="🔋 Battery: --%  |  ⚡ Plan: Balanced", font=ctk.CTkFont(size=13, weight="bold"), text_color="#4ADE80")
@@ -6909,6 +7413,8 @@ class InfinixGTToolkitApp:
             return
         if not self.root.winfo_viewable():
             return
+        if isinstance(color, (tuple, list)):
+            color = color[0] if ctk.get_appearance_mode() == "Light" else color[1]
         w = canvas.winfo_width()
         h = canvas.winfo_height()
         if w < 30 or h < 30:
@@ -6935,7 +7441,7 @@ class InfinixGTToolkitApp:
         pct_text = f"{pct:.0f}%" if pct is not None else "--%"
         canvas.create_text(cx, cy - 10, text=pct_text, fill="#FFFFFF",
                            font=("Segoe UI", 16, "bold"))
-        canvas.create_text(cx, cy + 10, text=temp_str, fill=color,
+        canvas.create_text(cx, cy + 10, text=str(temp_str) if temp_str is not None else "--°C", fill=color,
                            font=("Segoe UI", 11, "bold"))
         canvas.create_text(cx, cy + 25, text=label, fill="#64748B",
                            font=("Segoe UI", 8, "bold"))
@@ -6986,13 +7492,6 @@ class InfinixGTToolkitApp:
     # -----------------------------------------------------------------------
     # Windows Startup Shortcut
     # -----------------------------------------------------------------------
-    def _on_autostart_toggled(self):
-        val = self.start_var.get()
-        if self._manage_startup_shortcut(val):
-            self.config["autostart"] = val
-            self._save_config()
-        else:
-            self.start_var.set(not val)
 
     def _manage_startup_shortcut(self, enable: bool):
         """Register elevated scheduled task and Windows Run key for instant logon startup and Task Manager integration."""
@@ -7694,7 +8193,8 @@ class InfinixGTToolkitApp:
 
                     if time.monotonic() >= next_temperature_read:
                         readings = HardwareEngine.get_temperature_readings()
-                        self.cpu_temp_val = readings["CPU"]
+                        self._sensor_readings = readings
+                        self.cpu_temp_val = readings.get("CPU") or readings.get("ACPI")
                         self.gpu_temp_val = readings["GPU"]
                         next_temperature_read = time.monotonic() + (5.0 if any(v is not None for v in readings.values()) else 30.0)
                     # Track CPU & GPU history for 60s sparkline graphs & AI Governor
@@ -7734,13 +8234,19 @@ class InfinixGTToolkitApp:
                                 self._ui_dispatch(self._on_battery_disconnected)
                     self.last_ac_state = on_ac
 
+                    fan_data = HardwareEngine.get_fan_rpm()
+                    c_rpm = fan_data.get("cpu_fan")
+                    g_rpm = fan_data.get("gpu_fan")
+                    f_rpm = fan_data.get("fan_rpm")
+
                     self._ui_dispatch(
                         self._update_telemetry_ui,
                         cpu_p, ram_p, ram_used_gb, ram_total_gb, bat_pct, on_ac,
                         gpu_p, disk_used_gb, disk_total_gb, disk_pct,
                         self.current_read_mbs, self.current_write_mbs,
                         self.current_down_kbs, self.current_up_kbs,
-                        net_recv_gb, net_sent_gb
+                        net_recv_gb, net_sent_gb,
+                        c_rpm, g_rpm, f_rpm
                     )
                 except Exception:
                     pass
@@ -7784,13 +8290,17 @@ class InfinixGTToolkitApp:
         if max_temp is not None and max_temp >= 72:
             return ("⚡ LIVE: ACTIVE WORKLOAD", THEME["accent_blue"],
                     f"Temps at {max_temp:.0f}°C. Airflow maintaining stability.")
+        if max_temp is None:
+            return ("● LIVE: LIMITED SENSOR DATA", THEME["text_secondary"],
+                    f"{cur_mode} Mode · CPU/GPU temperatures are not reported.")
         return ("🟢 LIVE: SYSTEM OPTIMAL", THEME["accent_green"],
                 f"Cool & quiet ({cur_mode} Mode). All systems normal.")
 
     def _update_telemetry_ui(self, cpu_p, ram_p, ram_used_gb, ram_total_gb, bat_pct, on_ac,
                             gpu_p=0.0, disk_used_gb=0.0, disk_total_gb=0.0, disk_pct=0.0,
                             read_mbs=0.0, write_mbs=0.0, down_kbs=0.0, up_kbs=0.0,
-                            net_recv_gb=0.0, net_sent_gb=0.0):
+                            net_recv_gb=0.0, net_sent_gb=0.0,
+                            cpu_fan_rpm=None, gpu_fan_rpm=None, fan_rpm=None):
         try:
             self._refresh_automation_status()
             status_text, status_color, action_text = self._compute_live_system_status(
@@ -7798,8 +8308,8 @@ class InfinixGTToolkitApp:
             )
 
             cpu_color = THEME["accent_rose"] if cpu_p > 90 else THEME["accent_amber"] if cpu_p > 70 else THEME["accent_blue"]
-            cpu_temp_display = f"{self.cpu_temp_val:.0f}°C" if self.cpu_temp_val is not None else "Normal"
-            gpu_temp_display = f"{self.gpu_temp_val:.0f}°C" if self.gpu_temp_val is not None else ("Active" if gpu_p else "Standby")
+            cpu_temp_display = f"{self.cpu_temp_val:.0f}°C" if self.cpu_temp_val is not None else telemetry_data.UNAVAILABLE
+            gpu_temp_display = f"{self.gpu_temp_val:.0f}°C" if self.gpu_temp_val is not None else telemetry_data.UNAVAILABLE
 
             # Update Top HUD Banner inside System Monitor
             if hasattr(self, 'telemetry_status_badge'):
@@ -7807,15 +8317,15 @@ class InfinixGTToolkitApp:
             if hasattr(self, 'telemetry_action_lbl'):
                 self.telemetry_action_lbl.configure(text=action_text)
             if hasattr(self, 'telemetry_cpu_temp_pill'):
-                self.telemetry_cpu_temp_pill.configure(text=f"💻 CPU: {cpu_temp_display}", text_color=cpu_color)
+                self.telemetry_cpu_temp_pill.configure(text=f"CPU: {cpu_temp_display}", text_color=cpu_color)
             if hasattr(self, 'telemetry_gpu_temp_pill'):
                 gpu_pill_color = THEME["accent_rose"] if (self.gpu_temp_val and self.gpu_temp_val >= 80) else THEME["accent_green"]
-                self.telemetry_gpu_temp_pill.configure(text=f"🎮 GPU: {gpu_temp_display}", text_color=gpu_pill_color)
+                self.telemetry_gpu_temp_pill.configure(text=f"GPU: {gpu_temp_display}", text_color=gpu_pill_color)
 
             if hasattr(self, 'hero_cpu_lbl'):
                 self.hero_cpu_lbl.configure(text=f"{cpu_p:.1f}%", text_color=cpu_color)
             if hasattr(self, 'cpu_pct_lbl'):
-                self.cpu_pct_lbl.configure(text="13th Gen Intel Core i5-13420H (8C/12T • 12MB Cache)")
+                self.cpu_pct_lbl.configure(text=getattr(self, "_device_cpu_text", "Detecting CPU…"))
             if hasattr(self, 'cpu_temp_chip'):
                 self.cpu_temp_chip.configure(text=f"🌡️ CPU: {cpu_temp_display}", text_color=cpu_color)
             if hasattr(self, 'cpu_bar'):
@@ -7826,35 +8336,41 @@ class InfinixGTToolkitApp:
                 self.hero_cpu_bar.configure(progress_color=cpu_color)
 
             # Draw CPU Circular Gauge & 60-Second Real-Time Sparkline
-            if hasattr(self, 'cpu_gauge_canvas'):
-                self._draw_donut_gauge(self.cpu_gauge_canvas, cpu_p, cpu_temp_display, cpu_color, "CPU LOAD")
-            self._draw_cpu_sparkline()
+            try:
+                if hasattr(self, 'cpu_gauge_canvas') and self.cpu_gauge_canvas.winfo_exists():
+                    self._draw_donut_gauge(self.cpu_gauge_canvas, cpu_p, cpu_temp_display, cpu_color, "CPU LOAD")
+                self._draw_cpu_sparkline()
+            except Exception:
+                pass
 
             if hasattr(self, 'ram_pct_lbl'):
-                self.ram_pct_lbl.configure(text=f"RAM Usage: {ram_used_gb:.1f} GB / {ram_total_gb:.1f} GB ({ram_p:.1f}%)")
+                self.ram_pct_lbl.configure(text=f"RAM Usage: {ram_used_gb:.1f} GiB / {ram_total_gb:.1f} GiB ({ram_p:.1f}%)")
             if hasattr(self, 'ram_bar'):
                 self.ram_bar.set(ram_p / 100.0)
 
             # GPU Telemetry
             if gpu_p is None:
                 if hasattr(self, 'gpu_pct_lbl'):
-                    self.gpu_pct_lbl.configure(text="GPU 3D Engine Load: Standby", text_color=THEME["text_muted"])
+                    self.gpu_pct_lbl.configure(text="GPU load: Not reported", text_color=THEME["text_muted"])
                 if hasattr(self, 'gpu_bar'):
                     self.gpu_bar.set(0.0)
                 if hasattr(self, 'hero_gpu_lbl'):
-                    self.hero_gpu_lbl.configure(text="Standby", text_color=THEME["text_muted"])
+                    self.hero_gpu_lbl.configure(text=telemetry_data.UNAVAILABLE, text_color=THEME["text_muted"])
                 if hasattr(self, 'hero_gpu_bar') and self.hero_gpu_bar != self.gpu_bar:
                     self.hero_gpu_bar.set(0.0)
                 if hasattr(self, 'gpu_temp_chip'):
                     self.gpu_temp_chip.configure(text=f"🌡️ GPU: {gpu_temp_display}", text_color=THEME["text_muted"])
-                if hasattr(self, 'gpu_gauge_canvas'):
-                    self._draw_donut_gauge(self.gpu_gauge_canvas, 0.0, gpu_temp_display, THEME["text_muted"], "GPU LOAD")
+                try:
+                    if hasattr(self, 'gpu_gauge_canvas') and self.gpu_gauge_canvas.winfo_exists():
+                        self._draw_donut_gauge(self.gpu_gauge_canvas, None, gpu_temp_display, THEME["text_muted"], "GPU LOAD")
+                except Exception:
+                    pass
             else:
                 gpu_color = THEME["accent_rose"] if gpu_p > 85 else THEME["accent_amber"] if gpu_p > 60 else THEME["accent_green"]
                 if hasattr(self, 'hero_gpu_lbl'):
                     self.hero_gpu_lbl.configure(text=f"{gpu_p:.1f}%", text_color=gpu_color)
                 if hasattr(self, 'gpu_pct_lbl'):
-                    self.gpu_pct_lbl.configure(text="Intel UHD Graphics & NVIDIA RTX 4050")
+                    self.gpu_pct_lbl.configure(text=getattr(self, "_device_gpu_text", "GPU engine load"))
                 if hasattr(self, 'gpu_temp_chip'):
                     self.gpu_temp_chip.configure(text=f"🌡️ GPU: {gpu_temp_display}", text_color=gpu_color)
                 if hasattr(self, 'gpu_bar'):
@@ -7863,11 +8379,17 @@ class InfinixGTToolkitApp:
                 if hasattr(self, 'hero_gpu_bar') and self.hero_gpu_bar != self.gpu_bar:
                     self.hero_gpu_bar.set(gpu_p / 100.0)
                     self.hero_gpu_bar.configure(progress_color=gpu_color)
-                if hasattr(self, 'gpu_gauge_canvas'):
-                    self._draw_donut_gauge(self.gpu_gauge_canvas, gpu_p, gpu_temp_display, gpu_color, "GPU LOAD")
+                try:
+                    if hasattr(self, 'gpu_gauge_canvas') and self.gpu_gauge_canvas.winfo_exists():
+                        self._draw_donut_gauge(self.gpu_gauge_canvas, gpu_p, gpu_temp_display, gpu_color, "GPU LOAD")
+                except Exception:
+                    pass
 
             # Draw GPU 60-Second Real-Time Sparkline
-            self._draw_gpu_sparkline()
+            try:
+                self._draw_gpu_sparkline()
+            except Exception:
+                pass
 
             if hasattr(self, 'hero_ram_lbl'):
                 self.hero_ram_lbl.configure(text=f"{ram_p:.0f}%")
@@ -7876,18 +8398,17 @@ class InfinixGTToolkitApp:
             # Storage & Disk I/O
             if hasattr(self, 'disk_stat_lbl'):
                 self.disk_stat_lbl.configure(text=f"Drive C: {disk_used_gb:.1f} GB Used / {disk_total_gb:.1f} GB Total ({disk_pct:.1f}%)")
-            if hasattr(self, '_ram_chart_samples'):
-                self._ram_chart_samples=(self._ram_chart_samples+[ram_p])[-60:]
-                self._disk_chart_samples=(self._disk_chart_samples+[disk_pct])[-60:]
-                neon_ui.sparkline(self.ram_graph_canvas,self._ram_chart_samples,'#AC6AFF')
-                neon_ui.sparkline(self.disk_graph_canvas,self._disk_chart_samples,'#FFC331')
-            for key, value in (('CPU', self.cpu_temp_val), ('GPU', self.gpu_temp_val)):
-                sensor=getattr(self,'sensor_labels',{}).get(key)
-                if sensor:
-                    sensor.configure(text=f'{value:.0f}°C' if value is not None else 'Not available')
-                about=getattr(self,'_about_live_labels',{}).get(key.lower()+'_temp')
-                if about:
-                    about.configure(text=f'{value:.0f}°C' if value is not None else 'N/A · Sensor not available')
+            try:
+                if hasattr(self, '_ram_chart_samples') and hasattr(self, 'ram_graph_canvas') and self.ram_graph_canvas.winfo_exists():
+                    self._ram_chart_samples = (self._ram_chart_samples + [ram_p])[-60:]
+                    self._disk_chart_samples = (self._disk_chart_samples + [disk_pct])[-60:]
+                    neon_ui.sparkline(self.ram_graph_canvas, self._ram_chart_samples, '#AC6AFF')
+                    neon_ui.sparkline(self.disk_graph_canvas, self._disk_chart_samples, '#FFC331')
+            except Exception:
+                pass
+            self._apply_sensor_readings(getattr(self, '_sensor_readings', {
+                'CPU': self.cpu_temp_val, 'GPU': self.gpu_temp_val}))
+            self._update_about_fast_stats(ram_used_gb, ram_total_gb, ram_p, bat_pct, on_ac)
             if hasattr(self, 'disk_bar'):
                 self.disk_bar.set(disk_pct / 100.0)
             if hasattr(self, 'disk_io_lbl'):
@@ -7912,7 +8433,7 @@ class InfinixGTToolkitApp:
                     text_color=THEME["accent_green"] if on_ac else bat_color
                 )
 
-            charge_desc = "AC Power Adapter Connected • Fast Charging" if on_ac else "Operating on Lithium-Ion Battery Power"
+            charge_desc = "AC power connected" if on_ac else "Operating on Lithium-Ion Battery Power"
             if hasattr(self, 'bat_stat_lbl'):
                 self.bat_stat_lbl.configure(text=f"{charge_desc} ({bat_pct}%)", text_color=bat_color)
             if hasattr(self, 'bat_bar'):
@@ -7929,7 +8450,7 @@ class InfinixGTToolkitApp:
                     hrs, mins = divmod(uptime_mins, 60)
                     days, hrs = divmod(hrs, 24)
                     up_str = f"{days}d {hrs}h {mins}m" if days else f"{hrs}h {mins}m"
-                    cap_info = getattr(self, '_cached_cap_info', "57.0 Wh / 70.0 Wh")
+                    cap_info = getattr(self, '_cached_cap_info', telemetry_data.UNAVAILABLE)
                     self.telemetry_bat_sub_lbl.configure(text=f"Capacity: {cap_info} • ⏱️ Uptime: {up_str}")
                 except Exception:
                     pass
@@ -7939,13 +8460,13 @@ class InfinixGTToolkitApp:
                 cpu_p, self.cpu_temp_val, gpu_p, self.gpu_temp_val, bat_pct, on_ac
             )
             if hasattr(self, 'side_status_badge'):
-                self.side_status_badge.configure(text="●  System monitor", text_color=status_color)
+                self.side_status_badge.configure(text="●  System overview", text_color=status_color)
             if hasattr(self, 'side_action_lbl'):
                 self.side_action_lbl.configure(text=action_text)
 
             if hasattr(self, 'side_cpu_lbl'):
                 cpu_temp_str = f" • {self.cpu_temp_val:.0f}°C" if self.cpu_temp_val is not None else ""
-                self.side_cpu_lbl.configure(text=f"💻 CPU: {cpu_p:.0f}%{cpu_temp_str}", text_color=cpu_color)
+                self.side_cpu_lbl.configure(text=f"CPU: {cpu_p:.0f}%{cpu_temp_str}", text_color=cpu_color)
                 self.side_cpu_bar.set(max(0.0, min(1.0, cpu_p / 100.0)))
                 self.side_cpu_bar.configure(progress_color=cpu_color)
             if hasattr(self, 'side_gpu_lbl'):
@@ -7953,13 +8474,14 @@ class InfinixGTToolkitApp:
                 gpu_temp_str = f" • {self.gpu_temp_val:.0f}°C" if self.gpu_temp_val is not None else ""
                 gpu_color = THEME["accent_rose"] if (self.gpu_temp_val and self.gpu_temp_val >= 80) or gpu_p_val >= 85 else THEME["accent_amber"] if (self.gpu_temp_val and self.gpu_temp_val >= 70) or gpu_p_val >= 60 else THEME["accent_cyan"]
                 if gpu_p is not None or self.gpu_temp_val is not None:
-                    self.side_gpu_lbl.configure(text=f"🎮 GPU: {gpu_p_val:.0f}%{gpu_temp_str}", text_color=gpu_color)
+                    gpu_load_text = f"{gpu_p:.0f}%" if gpu_p is not None else telemetry_data.UNAVAILABLE
+                    self.side_gpu_lbl.configure(text=f"GPU: {gpu_load_text}{gpu_temp_str}", text_color=gpu_color)
                 else:
-                    self.side_gpu_lbl.configure(text="🎮 GPU: Standby", text_color=THEME["text_muted"])
+                    self.side_gpu_lbl.configure(text="GPU: Not reported", text_color=THEME["text_muted"])
                 self.side_gpu_bar.set(max(0.0, min(1.0, gpu_p_val / 100.0)))
                 self.side_gpu_bar.configure(progress_color=gpu_color)
             if hasattr(self, 'side_ram_lbl'):
-                self.side_ram_lbl.configure(text=f"🧠 RAM: {ram_p:.0f}%")
+                self.side_ram_lbl.configure(text=f"RAM: {ram_p:.0f}%")
                 self.side_ram_bar.set(max(0.0, min(1.0, ram_p / 100.0)))
             if hasattr(self, 'side_bat_lbl'):
                 bat_icon = "⚡" if on_ac else "🔋"
@@ -7974,14 +8496,43 @@ class InfinixGTToolkitApp:
                 self.side_bat_bar.set(max(0.0, min(1.0, bat_pct / 100.0)))
                 self.side_bat_bar.configure(progress_color=bat_color)
 
+            # Live Dual Exhaust Fan RPM Readout Updates
+            if fan_rpm is not None:
+                self.fan_rpm_val = fan_rpm
+            if cpu_fan_rpm is not None:
+                self.cpu_fan_rpm = cpu_fan_rpm
+            if gpu_fan_rpm is not None:
+                self.gpu_fan_rpm = gpu_fan_rpm
+
+            if hasattr(self, "fan_live_rpm_badge") and self.fan_live_rpm_badge.winfo_exists():
+                f_val = getattr(self, "fan_rpm_val", None)
+                if f_val and f_val > 0:
+                    badge_color = THEME["accent_green"] if f_val < 3500 else THEME["accent_blue"] if f_val < 4500 else THEME["accent_rose"]
+                    self.fan_live_rpm_badge.configure(
+                        text=f"\u26a1 Live: {f_val:,} RPM",
+                        text_color=badge_color
+                    )
+                else:
+                    self.fan_live_rpm_badge.configure(text="\u26a1 Live: Dynamic", text_color=THEME["accent_green"])
+
+            if hasattr(self, "cpu_fan_rpm_chip") and self.cpu_fan_rpm_chip.winfo_exists():
+                c_val = getattr(self, "cpu_fan_rpm", None)
+                c_text = f"\U0001f4bb CPU Fan: {c_val:,} RPM" if c_val else "\U0001f4bb CPU Fan: Dynamic"
+                self.cpu_fan_rpm_chip.configure(text=c_text)
+
+            if hasattr(self, "gpu_fan_rpm_chip") and self.gpu_fan_rpm_chip.winfo_exists():
+                g_val = getattr(self, "gpu_fan_rpm", None)
+                g_text = f"\U0001f3ae GPU Fan: {g_val:,} RPM" if g_val else "\U0001f3ae GPU Fan: Dynamic"
+                self.gpu_fan_rpm_chip.configure(text=g_text)
+
             # Mini HUD Floating Widget Update
             if getattr(self, 'hud_window', None) is not None and self.hud_window.winfo_exists():
                 if hasattr(self, 'hud_cpu_lbl'):
-                    self.hud_cpu_lbl.configure(text=f"💻 CPU: {cpu_p:.0f}%  |  🧠 RAM: {ram_p:.0f}%", text_color=cpu_color)
+                    self.hud_cpu_lbl.configure(text=f"CPU: {cpu_p:.0f}%  |  RAM: {ram_p:.0f}%", text_color=cpu_color)
                 if hasattr(self, 'hud_bat_lbl'):
                     plan_mode = getattr(self, 'mode_var', None)
                     p_text = plan_mode.get() if plan_mode else "Balanced"
-                    self.hud_bat_lbl.configure(text=f"⚡ Battery: {bat_pct}%  |  🚀 Plan: {p_text}", text_color=bat_color)
+                    self.hud_bat_lbl.configure(text=f"Battery: {bat_pct}%  |  🚀 Plan: {p_text}", text_color=bat_color)
                 if hasattr(self, 'hud_fx_lbl'):
                     self.hud_fx_lbl.configure(text=f"✨ FX: {self.effect_mode}")
         except Exception:
@@ -8280,6 +8831,16 @@ class InfinixGTToolkitApp:
         if hasattr(self, 'power_listener') and self.power_listener:
             try:
                 self.power_listener.stop()
+            except Exception:
+                pass
+        if hasattr(self, 'hardware_mode_listener') and self.hardware_mode_listener:
+            try:
+                self.hardware_mode_listener.stop()
+            except Exception:
+                pass
+        if hasattr(self, 'mode_osd') and self.mode_osd:
+            try:
+                self.mode_osd.hide()
             except Exception:
                 pass
         WindowsKeyLockEngine.set_lock(False)

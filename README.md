@@ -1,6 +1,8 @@
 # Infinix GT Book Custom Control Center
 
-An open-source Windows control center for the **Infinix GT Book**, built for owners who want one place to control lighting, performance, cooling, profiles, and live hardware monitoring.
+An open-source Windows control center for the **Infinix GT Book**, built for owners who want one place to control lighting, performance, cooling, and live hardware monitoring.
+
+Developed by **Yashwant Mandal**, Jharkhand, India.
 
 [Download the latest release](https://github.com/yashwantmandal26/Infinix-GT-Book-Custom-Control-Center/releases/latest) · [Report an issue](https://github.com/yashwantmandal26/Infinix-GT-Book-Custom-Control-Center/issues) · MIT licensed
 
@@ -21,7 +23,7 @@ An open-source Windows control center for the **Infinix GT Book**, built for own
 - **Rear Mecha Bar control** for supported firmware, animated, audio-reactive, and system-reactive modes.
 - **Performance controls** for operating modes, CPU/GPU settings, and fan behaviour.
 - **Live mini monitor** for temperatures, load, memory, battery, fan, and power data.
-- **Profiles and presets** with import/export support and startup automation.
+- **Lighting palettes** with coordinated zone colors and undo/redo controls.
 - **Built-in update checks** with release manifest and SHA-256 verification.
 - **Dark and light themes** in a single portable desktop application.
 
@@ -68,7 +70,11 @@ Build the executable:
 powershell -ExecutionPolicy Bypass -File .\scripts\build.ps1
 ```
 
-Run the focused verification suite:
+Building also updates the main folder's `InfinixGTToolkit.exe` and matching
+manifest. If the previous version is running, choose **Exit Toolkit** from its
+system-tray menu before reopening the app; the window's X button can hide it.
+
+Run the complete verification suite:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\test.ps1
@@ -82,6 +88,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\test.ps1
 | `backzone_ui.py` | Rear Mecha Bar interface and its available effect categories |
 | `studio_ui.py`, `neon_ui.py`, `color_studio.py` | Lighting interface and colour controls |
 | `app_runtime.py`, `hardware_runtime.py`, `automation_policy.py` | Runtime and automation services |
+| `telemetry_data.py` | Shared read-only sensor snapshots and validated measurement formatting |
 | `test_*.py` | Automated tests and hardware-safe protocol checks |
 | `scripts/` | Setup, build, test, packaging, and release helpers |
 | `docs/` | Screenshots and supporting project material |
@@ -89,8 +96,8 @@ powershell -ExecutionPolicy Bypass -File .\scripts\test.ps1
 
 ## Project status
 
-- Current release: **v4.5.2**
-- Focused validation: **54 tests and 17 subtests passed**
+- Current local build: **v4.5.7**
+- Automated validation: **121 tests and 25 subtests passed**; see [validation details](docs/VALIDATION.md)
 - The project is community-made and is not affiliated with Infinix
 - Contributions, hardware observations, and reproducible bug reports are welcome
 

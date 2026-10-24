@@ -1,7 +1,5 @@
 """User-control regression checks; all hardware, hooks and persistence mocked."""
 import copy
-import io
-import json
 import unittest
 from contextlib import ExitStack
 from unittest.mock import patch
@@ -41,7 +39,7 @@ class HistoryTests(unittest.TestCase):
 
 
 class UserControlsTests(unittest.TestCase):
-    def test_group_undo_presets_and_close_preference(self):
+    def test_group_undo_navigation_and_close_preference(self):
         with ExitStack() as stack:
             for engine in (toolkit.HardwareEngine,toolkit.SerialEngine):
                 for name in vars(engine):
@@ -75,29 +73,23 @@ class UserControlsTests(unittest.TestCase):
                 self.assertEqual(app.zones,before)
                 app._move_lighting_history(1)
                 self.assertEqual(app.zones,after)
-                app.preset_name_entry.insert(0,"Evening")
-                app._save_user_preset()
-                app.preset_name_entry.delete(0,"end")
-                app.preset_name_entry.insert(0,"Evening renamed")
-                app._rename_user_preset()
-                self.assertNotIn("Evening",app.config["user_presets"])
-                self.assertIn("Evening renamed",app.config["user_presets"])
-                with patch.object(app,"_on_mode_selected") as performance:
-                    app._load_user_preset()
-                    performance.assert_not_called()
-                    app._set_user_preference("preset_include_power",True)
-                    app._load_user_preset()
-                    performance.assert_called_once()
-                imported = dict(app.config["user_presets"]["Evening renamed"],preset_name="Imported")
-                with patch("tkinter.filedialog.askopenfilename",return_value="preset.json"), \
-                     patch("builtins.open",return_value=io.StringIO(json.dumps(imported))), \
-                     patch.object(app,"_apply_lighting_hardware") as apply:
-                    app._import_preset_file()
-                    apply.assert_not_called()
-                self.assertIn("Imported",app.config["user_presets"])
-                app._delete_user_preset()
-                self.assertNotIn("Imported",app.config["user_presets"])
-                self.assertEqual(app.zones,after)
+                self.assertEqual(set(app.nav_buttons), {"lighting", "backzone", "performance", "telemetry", "about"})
+                self.assertEqual(set(app.pages), set(app.nav_buttons))
+                self.assertFalse(hasattr(app, "preset_name_entry"))
+                self.assertTrue(app.root.bind("<Alt-Key-5>"))
+                self.assertFalse(app.root.bind("<Alt-Key-6>"))
+                app._select_nav("presets")
+                self.assertEqual(app.active_page, "lighting")
+                def labels(widget):
+                    result = []
+                    if isinstance(widget, toolkit.ctk.CTkLabel):
+                        result.append(widget.cget("text"))
+                    for child in widget.winfo_children():
+                        result.extend(labels(child))
+                    return result
+                about_text = labels(app.pages["about"])
+                self.assertIn("Yashwant Mandal", about_text)
+                self.assertIn("Jharkhand, India", about_text)
                 with patch.object(app.root,"withdraw") as hide, patch.object(app,"_quit_app") as quit_app:
                     app._on_close_requested()
                     hide.assert_called_once()

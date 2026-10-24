@@ -290,6 +290,9 @@ class ControlCenterTests(unittest.TestCase):
                         app._select_nav(page)
                         app.root.update()
                         self.assertTrue(app.pages[page].winfo_ismapped(), page)
+                from PIL import ImageGrab
+                hwnd = toolkit.ctypes.windll.user32.GetParent(app.root.winfo_id())
+                ImageGrab.grab(window=hwnd).save('about_device_preview.png')
                 app._select_nav('lighting')
                 self.assertIn('Spectrum Flow', app.bz_mode_seg.cget('values'))
                 self.assertEqual(app.dir_seg.cget('values'), list(toolkit.ANIMATION_DIRECTIONS))
@@ -297,12 +300,8 @@ class ControlCenterTests(unittest.TestCase):
                 app.root.update()
                 self.assertLess(len(app.top_engine_pill.cget('text')), 35)
                 app._set_hardware_status(True, 'Rear light bar')
-                app.preset_name_entry.insert(0, 'Regression profile')
-                app.anim_speed = 'Turbo'
-                app._save_user_preset()
-                app.anim_speed = 'Slow'
-                app._load_user_preset()
-                self.assertEqual(app.anim_speed, 'Turbo')
+                self.assertNotIn("presets", app.pages)
+                self.assertNotIn("presets", app.nav_buttons)
                 app.root.update()
                 self.assertFalse(errors, errors)
                 # Switch to Rear light bar tab and capture its preview screenshot
@@ -1106,8 +1105,8 @@ class ControlCenterTests(unittest.TestCase):
             self.assertTrue(toolkit.HardwareEngine.set_windows_power_plan("Beast"))
         restore.assert_called_once_with(67)
 
-    def test_performance_mode_never_switches_windows_power_plan(self):
-        """The toolkit's modes must leave the user's display policy untouched."""
+    def test_performance_mode_syncs_windows_power_plan(self):
+        """Mode selection synchronizes Windows power plan and Energy Saver policies."""
         class MockApp:
             config = {"power_mode": "Balanced"}
             mode_var = SimpleNamespace(get=lambda: "Beast", set=lambda _value: None)
@@ -1126,8 +1125,24 @@ class ControlCenterTests(unittest.TestCase):
         with patch.object(toolkit.HardwareEngine, "set_performance_mode", return_value=True), \
              patch.object(toolkit.HardwareEngine, "set_windows_power_plan") as plan:
             toolkit.InfinixGTToolkitApp._on_mode_selected(app)
-        plan.assert_not_called()
+        plan.assert_called_with("Beast")
         self.assertEqual(app.config["power_mode"], "Beast")
+
+    def test_quiet_mode_enables_energy_saver_and_decreases_brightness(self):
+        """Switching to Quiet mode enables Windows Energy Saver and decreases brightness by 5%."""
+        toolkit.HardwareEngine._last_power_plan_mode = "Balanced"
+        toolkit.HardwareEngine._saved_pre_quiet_brightness = None
+
+        with patch.object(toolkit.HardwareEngine, "get_display_brightness", return_value=60), \
+             patch.object(toolkit.HardwareEngine, "set_display_brightness") as mock_set_b, \
+             patch("subprocess.run") as mock_run:
+            mock_run.return_value.returncode = 0
+            ok = toolkit.HardwareEngine.set_windows_power_plan("Quiet")
+            self.assertTrue(ok)
+            # Brightness must be decreased by exactly 5% (60 -> 55)
+            mock_set_b.assert_called_with(55)
+            self.assertEqual(toolkit.HardwareEngine._saved_pre_quiet_brightness, 60)
+            self.assertEqual(toolkit.HardwareEngine._last_power_plan_mode, "Quiet")
 
     def test_performance_write_is_confirmed_by_ec_readback(self):
         provider = object()
@@ -1150,6 +1165,8 @@ class ControlCenterTests(unittest.TestCase):
         """Pause stops automatic mode changes while leaving manual controls available."""
         class MockApp:
             config = {"auto_switch_on_ac": True, "automation_paused": True}
+            def _about_refresh_live(self, silent=False):
+                pass
             mode_var = SimpleNamespace(set=lambda _value: (_ for _ in ()).throw(
                 AssertionError("paused automation changed the mode")))
             battery_val = 100
@@ -1180,6 +1197,8 @@ class ControlCenterTests(unittest.TestCase):
         """Automatic AC profile changes only change performance mode."""
         class MockApp:
             config = {"auto_switch_on_ac": True}
+            def _about_refresh_live(self, silent=False):
+                pass
             mode_var = SimpleNamespace(set=lambda value: None)
             def _automatic_mode_change_blocked(self, force=False):
                 return False
@@ -1233,6 +1252,51 @@ class ControlCenterTests(unittest.TestCase):
             prompt(app, "dGPU only")
         ask.assert_called_once()
         restart.assert_not_called()
+
+
+
+
+
+
+    def test_color_presets_do_not_switch_studio_section(self):
+        """Applying a preset or global color must preserve active studio_section (Color presets)."""
+        app = SimpleNamespace(
+            studio_sections={"Effects": (), "Zone color": (), "Color presets": ()},
+            studio_section="Color presets",
+            selected_zone="1",
+            zones={"1": [56, 189, 248], "2": [56, 189, 248], "3": [56, 189, 248], "4": [56, 189, 248]},
+            current_color=[56, 189, 248],
+            config={},
+            effect_mode="Solid",
+            _rgb_to_hex=lambda rgb: f"#{rgb[0]:02x}{rgb[1]:02x}{rgb[2]:02x}",
+            _tc=lambda col: "#FFFFFF",
+            _save_config=lambda: None,
+            _update_theme_buttons_ui=lambda: None,
+            _update_fx_status_ui=lambda: None,
+            _update_zone_buttons_ui=lambda: None,
+            _apply_lighting_hardware=lambda: None,
+            _show_studio_section=lambda name: setattr(app, "studio_section", name),
+        )
+        app._on_zone_clicked = lambda zid, switch_tab=False: toolkit.InfinixGTToolkitApp._on_zone_clicked(app, zid, switch_tab=switch_tab)
+
+        # Calling _on_zone_clicked without switch_tab (as done by presets) must NOT switch tab
+        app._on_zone_clicked("2", switch_tab=False)
+        self.assertEqual(app.selected_zone, "2")
+        self.assertEqual(app.studio_section, "Color presets")
+
+        # Calling _crossfade_zone_combo must NOT switch tab away from "Color presets"
+        target = {"1": [255, 0, 0], "2": [0, 255, 0], "3": [0, 0, 255], "4": [255, 255, 0]}
+        toolkit.InfinixGTToolkitApp._crossfade_zone_combo(app, target)
+        self.assertEqual(app.studio_section, "Color presets")
+
+        # Calling _apply_global_color must NOT switch tab away from "Color presets"
+        toolkit.InfinixGTToolkitApp._apply_global_color(app, (255, 0, 0), skip_fade=True)
+        self.assertEqual(app.studio_section, "Color presets")
+
+        # Explicitly clicking a zone pill (switch_tab=True) DOES switch to "Zone color"
+        app._on_zone_clicked("3", switch_tab=True)
+        self.assertEqual(app.selected_zone, "3")
+        self.assertEqual(app.studio_section, "Zone color")
 
 
 if __name__ == '__main__':

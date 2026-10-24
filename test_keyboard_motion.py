@@ -2,7 +2,7 @@
 
 import unittest
 
-from keyboard_motion import CUSTOM_MOTION_EFFECTS, render_custom_motion
+from keyboard_motion import CUSTOM_MOTION_EFFECTS, MOTION_PERIODS, render_custom_motion
 
 
 class KeyboardMotionTests(unittest.TestCase):
@@ -34,15 +34,40 @@ class KeyboardMotionTests(unittest.TestCase):
                                  tuple(reverse[str(i)] for i in range(4, 0, -1)))
 
     def test_phase_signatures_are_distinct(self):
-        slingshot = self.frame("MagneticSlingshot", 45)
+        slingshot = self.frame("MagneticSlingshot", 30)
         self.assertGreater(sum(slingshot["2"]), sum(slingshot["1"]))
         relay_start = self.frame("ChromaticRelay", 0)
-        relay_handoff = self.frame("ChromaticRelay", 20)
+        relay_handoff = self.frame("ChromaticRelay", 40)
         self.assertGreater(sum(relay_start["1"]), sum(relay_start["2"]))
         self.assertGreater(sum(relay_handoff["2"]), sum(relay_handoff["1"]))
-        self.assertEqual(self.frame("TimeFracture", 37), self.frame("TimeFracture", 43))
+        for step in (48, 54, 60):
+            frozen = self.frame("TimeFracture", step)
+            self.assertEqual(max(frozen, key=lambda z: sum(frozen[z])), "4")
+        rewind = self.frame("TimeFracture", 84)
+        self.assertEqual(max(rewind, key=lambda z: sum(rewind[z])), "2")
         eclipse = self.frame("OrbitalEclipse", 48)
         self.assertNotEqual(eclipse["2"], eclipse["4"])
+
+    def test_loops_are_continuous_and_never_black_out(self):
+        for effect in CUSTOM_MOTION_EFFECTS:
+            period = MOTION_PERIODS[effect]
+            with self.subTest(effect=effect):
+                for step in (0, 19.5, period - 0.25):
+                    self.assertEqual(self.frame(effect, step), self.frame(effect, step + period))
+                # Sample fractional steps as well as every cycle boundary.
+                for n in range(int(period * 4) + 1):
+                    before = self.frame(effect, n / 4.0)
+                    after = self.frame(effect, (n + 1) / 4.0)
+                    for zone in before:
+                        self.assertGreater(max(before[zone]), 15)
+                        self.assertLessEqual(max(abs(a - b) for a, b in zip(before[zone], after[zone])), 12)
+
+    def test_matching_colors_still_produce_visible_motion(self):
+        for effect in CUSTOM_MOTION_EFFECTS:
+            with self.subTest(effect=effect):
+                frames = [render_custom_motion(effect, step, self.direction,
+                          self.primary, self.primary) for step in (0, 20, 40, 60)]
+                self.assertGreater(len({tuple(frame.values()) for frame in frames}), 2)
 
 
 if __name__ == "__main__":

@@ -30,7 +30,7 @@ The ignore file keeps EXEs, build output and local settings out of source commit
 2. Update numeric and string versions in `version_info.txt` to match.
 3. Run `scripts/test.ps1`, then `scripts/build.ps1`. Test the built EXE on GL613.
 4. Commit, push, then create a new matching tag (for example `v4.5.1`).
-5. The workflow builds on Windows, runs the focused tests and publishes a
+5. The workflow builds on Windows, runs the complete test suite and publishes a
    GitHub Release with the executable, portable ZIP and integrity manifest.
 
 ```powershell

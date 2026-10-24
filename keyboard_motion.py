@@ -11,6 +11,11 @@ CUSTOM_MOTION_EFFECTS = (
     "OrbitalEclipse",
 )
 
+MOTION_PERIODS = {
+    "MagneticSlingshot": 120.0, "ChromaticRelay": 160.0,
+    "TimeFracture": 144.0, "OrbitalEclipse": 160.0,
+}
+
 
 def _clamp(value):
     return max(0, min(255, int(round(value))))
@@ -37,8 +42,35 @@ def _accent(primary, secondary):
         (hue + 0.48) % 1.0, max(0.7, saturation), max(0.7, value)))
 
 
+def _ease(value):
+    return value ** 3 * (value * (value * 6.0 - 15.0) + 10.0)
+
+
+def _color_flow(primary, secondary, amount):
+    """Blend around the hue wheel to keep the handoff saturated."""
+    h1, s1, v1 = colorsys.rgb_to_hsv(*(c / 255.0 for c in primary))
+    h2, s2, v2 = colorsys.rgb_to_hsv(*(c / 255.0 for c in secondary))
+    if s1 < 0.01:
+        h1 = h2
+    if s2 < 0.01:
+        h2 = h1
+    distance = (h2 - h1 + 0.5) % 1.0 - 0.5
+    return tuple(_clamp(c * 255) for c in colorsys.hsv_to_rgb(
+        (h1 + distance * amount) % 1.0,
+        s1 + (s2 - s1) * amount, v1 + (v2 - v1) * amount))
+
+
+def _time_position(phase):
+    # Forward sweep, suspended crest, rewind, release, then return home.
+    beats = ((0, 0), (48, 3), (60, 3), (84, 1), (108, 3), (144, 0))
+    for (start, left), (end, right) in zip(beats, beats[1:]):
+        if phase <= end:
+            return left + (right - left) * _ease((phase - start) / (end - start))
+    return 0.0
+
+
 def render_custom_motion(effect, step, direction, primary, secondary):
-    """Return four RGB zones; step advances once per keyboard animation frame."""
+    """Return four RGB zones with continuous loops and no full-keyboard flashes."""
     if effect not in CUSTOM_MOTION_EFFECTS:
         raise ValueError(f"Unsupported custom motion effect: {effect}")
     primary = tuple(primary)
@@ -46,84 +78,52 @@ def render_custom_motion(effect, step, direction, primary, secondary):
     reverse = "Right to Left" in direction
     zones = {}
 
+    period = MOTION_PERIODS[effect]
+    phase = step % period
+    angle = math.tau * phase / period
+
     if effect == "MagneticSlingshot":
-        phase = step % 96.0
-        swapped = int(step // 96.0) % 2 == 1
-        left_color, right_color = (secondary, primary) if swapped else (primary, secondary)
-        if phase < 40:
-            distance = 1.5 * (1.0 - phase / 40.0)
-            left, right = 1.5 - distance, 1.5 + distance
-            flash = 0.0
-        elif phase < 50:
-            left = right = 1.5
-            flash = math.sin(math.pi * (phase - 40.0) / 10.0)
-        elif phase < 78:
-            distance = 2.2 * (phase - 50.0) / 28.0
-            left, right = 1.5 - distance, 1.5 + distance
-            left_color, right_color = right_color, left_color
-            flash = 0.0
-        else:
-            left, right, flash = -1.0, 4.0, 0.0
+        # Two ribbons cross and trade sides, braking gently at the edges.
+        left = 1.5 - 1.5 * math.cos(angle)
+        right = 3.0 - left
+        collision = math.exp(-0.5 * (math.cos(angle) / 0.22) ** 2)
         for index in range(4):
-            luma_left = _glow(index, left)
-            luma_right = _glow(index, right)
-            color = _mix(_scale(left_color, 0.06), left_color, luma_left)
-            color = tuple(_clamp(a + b * luma_right) for a, b in zip(color, right_color))
-            zones[str(index + 1)] = _mix(color, (255, 255, 255), flash * _glow(index, 1.5, 0.9))
+            a, b = _glow(index, left, 0.72), _glow(index, right, 0.72)
+            color = _color_flow(primary, secondary, b / max(0.001, a + b))
+            intensity = 0.18 + 0.72 * max(a, b)
+            intensity += 0.10 * collision * _glow(index, 1.5, 0.85)
+            zones[str(index + 1)] = _scale(color, intensity)
 
     elif effect == "ChromaticRelay":
-        phase = step % 144.0
-        leg = min(5, int(phase / 24.0))
-        progress = (phase % 24.0) / 24.0
-        path = (0, 1, 2, 3, 2, 1, 0)
-        source = path[leg]
-        target = path[leg + 1]
-        handoff = progress * progress * (3.0 - 2.0 * progress)
-        source_color = _mix(primary, secondary, leg / 6.0)
-        target_color = _mix(primary, secondary, (leg + 1) / 6.0)
+        # A broad saturated ribbon passes color smoothly between hardware zones.
         for index in range(4):
-            ambient = _scale(_mix(primary, secondary, index / 3.0), 0.09)
-            if index == source:
-                ambient = _mix(ambient, source_color, 0.92 * (1.0 - handoff))
-            if index == target:
-                ambient = _mix(ambient, target_color, 0.92 * handoff)
-            zones[str(index + 1)] = ambient
+            local = angle - index * math.pi / 2.0
+            handoff = (1.0 + math.cos(local)) / 2.0
+            crest = ((1.0 + math.cos(local - 0.55)) / 2.0) ** 2
+            color = _color_flow(primary, secondary, handoff)
+            zones[str(index + 1)] = _scale(color, 0.28 + 0.72 * crest)
 
     elif effect == "TimeFracture":
-        phase = step % 96.0
-        if phase < 36:
-            position = 3.0 * phase / 36.0
-            flash = 0.0
-        elif phase < 48:
-            position = 3.0
-            flash = 0.50 if int(phase / 3.0) % 2 == 0 else 0.0
-        elif phase < 64:
-            position = 3.0 - 2.0 * (phase - 48.0) / 16.0
-            flash = 0.0
-        elif phase < 78:
-            position = 1.0 + 2.0 * (phase - 64.0) / 14.0
-            flash = 0.0
-        else:
-            position = 3.0 + (phase - 78.0) / 5.0
-            flash = 0.0
+        position = _time_position(phase)
+        echo = _time_position((phase - 12.0) % period)
         for index in range(4):
-            base = _scale(primary, 0.07)
-            crest = _glow(index, position, 0.48)
-            trail = _glow(index, position - 0.9, 0.7) * 0.33
-            color = _mix(base, secondary, min(1.0, crest + trail))
-            zones[str(index + 1)] = _mix(color, (255, 255, 255), flash * crest)
+            crest = _glow(index, position, 0.62)
+            trail = _glow(index, echo, 0.85)
+            color = _color_flow(primary, secondary, crest / max(0.001, crest + trail * 0.65))
+            zones[str(index + 1)] = _scale(color, 0.18 + 0.62 * crest + 0.20 * trail)
 
     else:  # OrbitalEclipse
-        phase = step % 96.0
-        position = -1.2 + 5.4 * phase / 96.0
-        background = primary if int(step // 96.0) % 2 == 0 else secondary
-        rim_color = secondary if background == primary else primary
+        # Circular distance keeps the last-to-first shadow handoff continuous.
+        blend = (1.0 - math.cos(angle)) / 2.0
+        background = _color_flow(primary, secondary, blend)
+        rim_color = _color_flow(secondary, primary, blend)
+        centre = phase * 4.0 / period
         for index in range(4):
-            shadow = _glow(index, position, 0.62)
-            rim = max(_glow(index, position - 0.83, 0.34),
-                      _glow(index, position + 0.83, 0.34))
-            color = _scale(background, 0.38 * (1.0 - shadow) + 0.025)
-            zones[str(index + 1)] = _mix(color, rim_color, min(1.0, rim * 0.95))
+            distance = (index - centre + 2.0) % 4.0 - 2.0
+            shadow = _glow(distance, 0.0, 0.48)
+            rim = max(_glow(distance, -0.85, 0.42), _glow(distance, 0.85, 0.42))
+            color = _scale(background, 0.60 - 0.44 * shadow)
+            zones[str(index + 1)] = _mix(color, rim_color, 0.88 * rim)
 
     if reverse:
         return {str(index + 1): zones[str(4 - index)] for index in range(4)}

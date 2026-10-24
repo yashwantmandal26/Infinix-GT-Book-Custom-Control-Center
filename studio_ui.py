@@ -158,7 +158,7 @@ def draw_keyboard(app):
         badge = c.create_text(bx,top-25,font=("Segoe UI", -max(10,min(14,round(ux*.30))),"bold"),tags=(tag,))
         marker = c.create_rectangle(bx-23,top-18,bx+23,top-16,width=0)
         app.zone_shapes[zid] = dict(badge=badge,overlay=marker)
-        c.tag_bind(tag,"<Button-1>",lambda event,z=zid:app._on_zone_clicked(z))
+        c.tag_bind(tag,"<Button-1>",lambda event,z=zid:app._on_zone_clicked(z, switch_tab=True))
         c.tag_bind(tag,"<Enter>",lambda event:c.configure(cursor="hand2"))
         c.tag_bind(tag,"<Leave>",lambda event:c.configure(cursor=""))
         colors = getattr(app,"_keyboard_preview_colors",app.zones)

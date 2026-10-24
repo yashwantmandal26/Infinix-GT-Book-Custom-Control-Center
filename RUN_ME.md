@@ -1,10 +1,15 @@
-# Infinix GT Book Custom Control Center � portable app
+# Infinix GT Book Custom Control Center - portable app
 
 For Windows on Infinix GT Book GL613 / BYD N16.
 
 1. Extract the entire ZIP.
 2. Exit other copies of the toolkit and the OEM lighting application.
+   For the toolkit, right-click its system-tray icon and choose **Exit Toolkit**.
+   Closing the window with X may leave the old copy running in the tray.
 3. Run InfinixGTToolkit.exe and accept the administrator prompt.
+
+The compact sidebar build shows **v4.5.7** beside the app name. Its sidebar has
+no scrollbar or laptop banner; all navigation and live metrics fit in one view.
 
 No Python installation is needed. The executable is unsigned. This is an
 unofficial community tool, not an Infinix release.

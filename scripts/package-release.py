@@ -5,9 +5,36 @@ import hashlib
 import json
 from pathlib import Path
 import shutil
+import uuid
 import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def sync_launcher(executable, manifest):
+    """Replace the usual launch target even if Windows has the old EXE mapped.
+
+    Keep a running binary in build/ until it exits; never terminate the app or
+    alter its settings. Roll back the rename if installing the staged copy fails.
+    """
+    launcher = ROOT / "InfinixGTToolkit.exe"
+    staged = ROOT / "InfinixGTToolkit.exe.staged"
+    shutil.copy2(executable, staged)
+    try:
+        staged.replace(launcher)
+    except PermissionError:
+        backup_dir = ROOT / "build" / "previous-launcher"
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        backup = backup_dir / f"InfinixGTToolkit-{uuid.uuid4().hex}.exe"
+        launcher.rename(backup)
+        try:
+            staged.replace(launcher)
+        except OSError:
+            backup.rename(launcher)
+            raise
+    shutil.copy2(manifest, ROOT / "update-manifest.json")
+    print(f"Updated main launcher: {launcher}")
+
 
 def app_version():
     tree = ast.parse((ROOT / "infinix_toolkit.py").read_text(encoding="utf-8"))
@@ -18,6 +45,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--exe", default="dist/InfinixGTToolkit.exe")
     parser.add_argument("--tag")
+    parser.add_argument("--sync-launcher", action="store_true")
     args = parser.parse_args()
     version = app_version()
     if args.tag and args.tag != "v" + version:
@@ -47,6 +75,8 @@ def main():
     checksums = out / "SHA256SUMS.txt"
     checksums.write_text("".join(hashlib.sha256(p.read_bytes()).hexdigest() + "  " + p.name + "\n"
                                  for p in (target, manifest, archive)), encoding="utf-8")
+    if args.sync_launcher:
+        sync_launcher(target, manifest)
     print(f"Packaged {version}: {archive}")
 
 if __name__ == "__main__":

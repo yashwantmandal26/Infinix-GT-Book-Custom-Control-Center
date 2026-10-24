@@ -3,7 +3,7 @@ from PyInstaller.utils.hooks import collect_all
 
 datas = [
     ('infinix_gt_icon.ico', '.'),
-    ('assets/gtbook_sidebar.webp', 'assets'),
+    ('assets', 'assets'),
 ]
 binaries = []
 hiddenimports = []
