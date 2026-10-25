@@ -12,15 +12,17 @@ from infinix_toolkit import ModeOSDOverlay, HardwareModeListener, HardwareEngine
 class TestModeOSDOverlay(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.root = tk.Tk()
+        try:
+            cls.root = tk._default_root
+            if cls.root is None:
+                cls.root = tk.Tk()
+        except Exception:
+            cls.root = tk.Tk()
         cls.root.withdraw()
 
     @classmethod
     def tearDownClass(cls):
-        try:
-            cls.root.destroy()
-        except Exception:
-            pass
+        pass
 
     def setUp(self):
         self.osd = ModeOSDOverlay(self.root)

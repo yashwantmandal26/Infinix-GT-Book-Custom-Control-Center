@@ -20,6 +20,45 @@ ProjectLogs/
 *_preview.png
 /color_picker_*.png
 /zone_card_*.png
+audio_visualizer_*.png
 update-manifest.json
 BUILD_INFO.json
 SHA256SUMS.txt
+
+# Scratch, dumps, native binaries and local backup directories
+*.dll
+*.pdb
+*.lnk
+*.config
+Madness of Technology.txt
+INFINIX_GT_CONTROL_CENTER_TOOLKIT/
+extracted_dlls/
+oem_resources/
+graphify-out/
+ui_redesign_backup/
+ui_redesign_previews/
+reliability_backup*/
+release-*/
+decompile_*.py
+find_*.py
+check_*.py
+launch_*.bat
+launch_*.vbs
+install_*.ps1
+installation_result.json
+temp_inspect.ps1
+apply_*.py
+redesign_*.py
+deep_system_audit.py
+live_production_sanity_test.py
+infinix_toolkit.before_*.py
+game_gpu_notifier.py
+infinix_backlight.py
+
+# Local development notes
+LIGHTING_STABILITY_FIXES.md
+RELEASE_NOTES_*.md
+RELIABILITY_UPDATE.md
+UI_REDESIGN_NOTES.md
+UNIFIED_POWER_UPDATE.md
+USER_EXPERIENCE_UPDATE.md

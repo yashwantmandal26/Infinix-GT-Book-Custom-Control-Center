@@ -115,7 +115,7 @@ def _collect_sensors():
     try:
         import pythoncom
         import win32com.client
-        pythoncom.CoInitialize()
+        hr = ctypes.windll.ole32.CoInitialize(None)
         locator = services = rows = None
         try:
             locator = win32com.client.Dispatch("WbemScripting.SWbemLocator")
@@ -146,7 +146,11 @@ def _collect_sensors():
         finally:
             # Release COM objects on their creating thread before uninitializing.
             rows = services = locator = None
-            pythoncom.CoUninitialize()
+            if hr == 0:
+                try:
+                    ctypes.windll.ole32.CoUninitialize()
+                except Exception:
+                    pass
     except Exception:
         pass
     if readings["GPU"] is None:
