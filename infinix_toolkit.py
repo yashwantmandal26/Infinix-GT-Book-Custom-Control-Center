@@ -2046,9 +2046,15 @@ class HardwareEngine:
         try:
             import pythoncom
             pythoncom.CoInitialize()
-            monitors = wmi.WMI(namespace="wmi").WmiMonitorBrightness()
-            if monitors:
-                return max(0, min(100, int(monitors[0].CurrentBrightness)))
+            try:
+                monitors = wmi.WMI(namespace="wmi").WmiMonitorBrightness()
+                if monitors:
+                    return max(0, min(100, int(monitors[0].CurrentBrightness)))
+            finally:
+                try:
+                    pythoncom.CoUninitialize()
+                except Exception:
+                    pass
         except Exception:
             pass
         return None
@@ -2059,12 +2065,18 @@ class HardwareEngine:
         try:
             import pythoncom
             pythoncom.CoInitialize()
-            methods = wmi.WMI(namespace="wmi").WmiMonitorBrightnessMethods()
-            if not methods:
-                return False
-            methods[0].WmiSetBrightness(
-                Timeout=0, Brightness=max(0, min(100, int(brightness))))
-            return True
+            try:
+                methods = wmi.WMI(namespace="wmi").WmiMonitorBrightnessMethods()
+                if not methods:
+                    return False
+                methods[0].WmiSetBrightness(
+                    Timeout=0, Brightness=max(0, min(100, int(brightness))))
+                return True
+            finally:
+                try:
+                    pythoncom.CoUninitialize()
+                except Exception:
+                    pass
         except Exception:
             return False
 
@@ -2592,6 +2604,204 @@ class ModeOSDOverlay:
                 pass
         self._hide_timer = None
 
+
+
+# ---------------------------------------------------------------------------
+# Windows On-Screen Display (OSD) Overlay for Critical Low Battery (<10%)
+# ---------------------------------------------------------------------------
+class LowBatteryBreathingOSD:
+    """Windows Topmost Breathing OSD Toast for Critical Low Battery (<10%).
+
+    - Deep crimson 3D curved pill card with neon red glow border
+    - Topmost, non-activating (WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_TOPMOST)
+    - Continuously breathes / fades in and out between 0.18 and 1.0 alpha until charger is connected
+    - Positioned at bottom-center of the screen
+    """
+    WIDTH = 440
+    HEIGHT = 110
+    CORNER_RADIUS = 28
+
+    def __init__(self, master=None):
+        self.master = master
+        self.window = None
+        self.canvas = None
+        self._bg_photo = None
+        self.is_breathing = False
+        self._breath_timer = None
+        self._start_time = 0.0
+        self._last_pct = None
+
+    def _render_card_image(self, bat_pct: int) -> ImageTk.PhotoImage:
+        img = Image.new("RGBA", (self.WIDTH, self.HEIGHT), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(img)
+
+        # Ambient outer glow layers
+        for i in range(3, 0, -1):
+            draw.rounded_rectangle(
+                [(-i, -i), (self.WIDTH - 1 + i, self.HEIGHT - 1 + i)],
+                radius=self.CORNER_RADIUS + i,
+                outline=(239, 68, 68, int(45 / i)),
+                width=1
+            )
+
+        # Base rounded card with deep dark red fill
+        draw.rounded_rectangle(
+            [(0, 0), (self.WIDTH - 1, self.HEIGHT - 1)],
+            radius=self.CORNER_RADIUS,
+            fill=(22, 6, 9, 252),
+            outline=(239, 68, 68, 255),
+            width=2
+        )
+
+        # Specular rim highlight arc across top
+        draw.arc(
+            [(12, 2), (self.WIDTH - 12, 38)],
+            start=190, end=350,
+            fill=(254, 202, 202, 110),
+            width=2
+        )
+
+        # Floating orb on left
+        orb_box = [18, 18, 90, 90]
+        draw.ellipse(orb_box, fill=(48, 10, 16, 255), outline=(239, 68, 68, 255), width=2)
+        draw.arc([orb_box[0] + 3, orb_box[1] + 2, orb_box[2] - 3, orb_box[1] + 28],
+                 start=200, end=340, fill=(255, 255, 255, 90), width=2)
+
+        # Battery icon inside orb
+        draw.rectangle([36, 40, 72, 68], outline=(252, 165, 165, 255), width=2)
+        draw.rectangle([72, 47, 76, 61], fill=(252, 165, 165, 255))
+        # Critical red level bar inside battery
+        draw.rectangle([39, 43, 48, 65], fill=(239, 68, 68, 255))
+        # Exclamation mark inside battery
+        draw.line([(57, 45), (57, 56)], fill=(255, 255, 255, 255), width=2)
+        draw.point([(57, 61)], fill=(255, 255, 255, 255))
+
+        # Text fonts
+        font_tag = None
+        font_title = None
+        font_sub = None
+        for fn in ("segoeui.ttf", "arial.ttf", "calibri.ttf"):
+            try:
+                font_tag = ImageFont.truetype(fn, 11)
+                font_title = ImageFont.truetype(fn, 16)
+                font_sub = ImageFont.truetype(fn, 11)
+                break
+            except Exception:
+                pass
+        if not font_title:
+            font_tag = ImageFont.load_default()
+            font_title = font_tag
+            font_sub = font_tag
+
+        # Draw tag
+        draw.text((106, 17), "⚠  CRITICAL BATTERY ALERT", fill=(248, 113, 113, 255), font=font_tag)
+        # Draw title
+        draw.text((106, 36), f"BATTERY AT {bat_pct}%  •  LOW POWER", fill=(255, 255, 255, 255), font=font_title)
+        # Draw subtitle
+        draw.text((106, 64), "⚡ Please connect charger immediately to prevent shutdown", fill=(252, 165, 165, 255), font=font_sub)
+
+        return ImageTk.PhotoImage(img)
+
+    def _create_window(self):
+        if not self.master:
+            return
+        self.window = tk.Toplevel(self.master)
+        self.window.withdraw()
+        self.window.overrideredirect(True)
+        self.window.attributes("-topmost", True)
+        self.window.configure(bg="#000001")
+        self.window.attributes("-transparentcolor", "#000001")
+
+        try:
+            hwnd = ctypes.windll.user32.GetParent(self.window.winfo_id()) or self.window.winfo_id()
+            user32 = ctypes.windll.user32
+            GWL_EXSTYLE = -20
+            WS_EX_TOOLWINDOW = 0x00000080
+            WS_EX_NOACTIVATE = 0x08000000
+            WS_EX_TOPMOST = 0x00000008
+            ex = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+            user32.SetWindowLongW(hwnd, GWL_EXSTYLE, ex | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TOPMOST)
+
+            rgn = ctypes.windll.gdi32.CreateRoundRectRgn(
+                0, 0, self.WIDTH + 1, self.HEIGHT + 1,
+                self.CORNER_RADIUS * 2, self.CORNER_RADIUS * 2
+            )
+            user32.SetWindowRgn(hwnd, rgn, True)
+        except Exception:
+            pass
+
+        self.canvas = tk.Canvas(
+            self.window, width=self.WIDTH, height=self.HEIGHT,
+            bg="#000001", highlightthickness=0
+        )
+        self.canvas.pack(fill="both", expand=True)
+
+    def _position_window(self):
+        w = self.WIDTH
+        h = self.HEIGHT
+        try:
+            sw = self.master.winfo_screenwidth()
+            sh = self.master.winfo_screenheight()
+        except Exception:
+            sw, sh = 1920, 1080
+        x = max(0, (sw - w) // 2)
+        y = max(0, sh - h - 145)
+        self.window.geometry(f"{w}x{h}+{x}+{y}")
+
+    def show(self, bat_pct: int):
+        if not self.master:
+            return
+        if not self.window or not self.window.winfo_exists():
+            self._create_window()
+
+        if self._last_pct != bat_pct or self._bg_photo is None:
+            self._last_pct = bat_pct
+            self._bg_photo = self._render_card_image(bat_pct)
+            if self.canvas:
+                self.canvas.delete("all")
+                self.canvas.create_image(0, 0, anchor="nw", image=self._bg_photo)
+
+        self._position_window()
+        self.window.deiconify()
+        self.window.lift()
+
+        if not self.is_breathing:
+            self.is_breathing = True
+            self._start_time = time.monotonic()
+            self._step_breathing()
+
+    def _step_breathing(self):
+        if not self.is_breathing or not self.window or not self.window.winfo_exists():
+            return
+
+        elapsed = time.monotonic() - self._start_time
+        sine_val = (math.sin(elapsed * 3.2) + 1.0) / 2.0
+        alpha = max(0.18, min(1.0, 0.18 + 0.82 * sine_val))
+
+        try:
+            self.window.attributes("-alpha", alpha)
+        except Exception:
+            pass
+
+        if self.master:
+            try:
+                self._breath_timer = self.master.after(40, self._step_breathing)
+            except Exception:
+                pass
+
+    def hide(self):
+        self.is_breathing = False
+        if self._breath_timer and self.master:
+            try:
+                self.master.after_cancel(self._breath_timer)
+            except Exception:
+                pass
+            self._breath_timer = None
+        if self.window and self.window.winfo_exists():
+            try:
+                self.window.withdraw()
+            except Exception:
+                pass
 
 # ---------------------------------------------------------------------------
 # Hardware Performance Mode Button & Key Listener
@@ -3231,6 +3441,10 @@ class InfinixGTToolkitApp:
 
         # Listen for physical performance mode buttons & OSD notifications
         self.mode_osd = None
+        self.low_bat_osd = None
+        self._low_bat_15s_alert_fired = False
+        self._low_bat_pulse_active = False
+        self._low_bat_osd_visible = False
         self.hardware_mode_listener = None
         self._start_hardware_mode_listener()
 
@@ -3371,6 +3585,7 @@ class InfinixGTToolkitApp:
         """Initializes listener for physical keyboard performance mode buttons and EC status."""
         try:
             self.mode_osd = ModeOSDOverlay(self.root)
+            self.low_bat_osd = LowBatteryBreathingOSD(self.root)
             self.hardware_mode_listener = HardwareModeListener(
                 callback=self._on_hardware_mode_changed,
                 poll_interval=0.35
@@ -3438,6 +3653,69 @@ class InfinixGTToolkitApp:
 
         if hasattr(self, "_show_mode_osd"):
             self._show_mode_osd(mode)
+
+
+    def _show_low_battery_osd(self, bat_pct: int):
+        self._low_bat_osd_visible = True
+        if hasattr(self, "low_bat_osd") and self.low_bat_osd:
+            try:
+                self.low_bat_osd.show(bat_pct)
+            except Exception:
+                pass
+
+    def _hide_low_battery_osd(self):
+        self._low_bat_osd_visible = False
+        if hasattr(self, "low_bat_osd") and self.low_bat_osd:
+            try:
+                self.low_bat_osd.hide()
+            except Exception:
+                pass
+
+    def _start_low_battery_red_pulse(self):
+        """Pulsates both keyboard RGB and rear light bar in red for exactly 15 seconds."""
+        if getattr(self, "_low_bat_pulse_active", False):
+            return
+
+        def pulse_worker():
+            self._low_bat_pulse_active = True
+            t_start = time.monotonic()
+            duration = 15.0
+            red_zones = {"1": (255, 0, 0), "2": (255, 0, 0), "3": (255, 0, 0), "4": (255, 0, 0)}
+
+            try:
+                while getattr(self, "running", True) and (time.monotonic() - t_start < duration):
+                    # Immediately abort emergency red pulse if charger is plugged in
+                    if getattr(self, "on_ac_val", False):
+                        break
+
+                    elapsed = time.monotonic() - t_start
+                    sine_val = (math.sin(elapsed * 4.2) + 1.0) / 2.0
+                    dyn_bright = max(10, int((0.15 + 0.85 * sine_val) * 100))
+
+                    # 1. Keyboard RGB in Red (all zones)
+                    HardwareEngine.send_4zone_rgb(red_zones, dyn_bright, set_mode_static=True)
+
+                    # 2. Rear Light Bar in Red
+                    SerialEngine.send_backzone_rgb(1, 255, 0, 0, 1, dyn_bright)
+                    HardwareEngine.send_mecha_bar(255, 0, 0, True)
+
+                    # 3. Virtual keyboard preview
+                    r_factor = dyn_bright / 100.0
+                    preview_zones = {z: (int(255 * r_factor), 0, 0) for z in ["1", "2", "3", "4"]}
+                    self._ui_dispatch(self._update_virtual_keyboard_preview, preview_zones)
+
+                    time.sleep(0.04)
+            finally:
+                self._low_bat_pulse_active = False
+                # Restore previous normal lighting states
+                try:
+                    self._apply_lighting_hardware()
+                    self._apply_backzone_hardware()
+                except Exception:
+                    pass
+
+        t = threading.Thread(target=pulse_worker, daemon=True, name="LowBatteryRedPulse")
+        t.start()
 
     def _show_mode_osd(self, mode: str):
         """Displays the Windows mini notification / OSD popup on screen."""
@@ -8591,6 +8869,9 @@ class InfinixGTToolkitApp:
             last_effect_mode = None
 
             while self.running:
+                if getattr(self, "_low_bat_pulse_active", False):
+                    time.sleep(0.05)
+                    continue
                 # When turned off or brightness is 0, sleep and do not send any HID animation packets
                 if getattr(self, 'brightness', 100) <= 0 or not self.heartbeat_active:
                     time.sleep(0.05)
@@ -8861,8 +9142,8 @@ class InfinixGTToolkitApp:
             while self.running:
                 mode = backzone_ui.available_rear_mode(getattr(self, "bz_mode", 1))
                 self.bz_mode = mode
-                if self._suspended or self._rear_test_active:
-                    time.sleep(0.2)
+                if self._suspended or self._rear_test_active or getattr(self, "_low_bat_pulse_active", False):
+                    time.sleep(0.05)
                     continue
                 if time.monotonic() - last_lock_check >= 1.0:
                     last_lock_check = time.monotonic()
@@ -9187,8 +9468,22 @@ class InfinixGTToolkitApp:
                     if len(self.gpu_history) > 60:
                         self.gpu_history.pop(0)
 
+                    # Critical Low Battery Alert (<10% on Battery):
+                    # 1) Continuous breathing OSD on screen until charger connected
+                    # 2) 15-second emergency Red breathing pulse on Keyboard RGB + Rear Bar
+                    if not on_ac and bat_pct < 10:
+                        self._ui_dispatch(self._show_low_battery_osd, int(bat_pct))
+                        if not getattr(self, "_low_bat_15s_alert_fired", False):
+                            self._low_bat_15s_alert_fired = True
+                            self._start_low_battery_red_pulse()
+                    else:
+                        if getattr(self, "_low_bat_osd_visible", False):
+                            self._ui_dispatch(self._hide_low_battery_osd)
+                        if on_ac or bat_pct >= 10:
+                            self._low_bat_15s_alert_fired = False
+
                     # Critical Battery Protection (<8% charge): cut heavy rear LED draw and clamp brightness
-                    if not on_ac and bat_pct <= 8:
+                    if not on_ac and bat_pct <= 8 and not getattr(self, "_low_bat_pulse_active", False):
                         if self.config.get("mecha_bar_enabled", True):
                             try:
                                 HardwareEngine.send_mecha_bar(0, 0, 0, False)
@@ -9610,12 +9905,21 @@ class InfinixGTToolkitApp:
         if (not self.config.get("auto_switch_on_ac", True)
                 or self._automatic_mode_change_blocked()):
             return
+        self._low_bat_15s_alert_fired = False
+        if hasattr(self, "_hide_low_battery_osd"):
+            self._hide_low_battery_osd()
         self.mode_var.set("Beast")
         self._on_mode_selected("Charger connected", automatic=True)
 
     def _on_battery_disconnected(self):
         self._about_refresh_live(silent=True)
         self._bat_alert_80_fired = False
+        if getattr(self, "battery_val", 100) < 10:
+            if hasattr(self, "_show_low_battery_osd"):
+                self._show_low_battery_osd(int(self.battery_val))
+            if not getattr(self, "_low_bat_15s_alert_fired", False):
+                self._low_bat_15s_alert_fired = True
+                self._start_low_battery_red_pulse()
         if self.config.get("auto_refresh_rate_on_battery", True) and hasattr(self, "_set_display_refresh_rate"):
             rates = getattr(self, "_supported_refresh_rates", [60, 120])
             min_hz = min(rates) if rates else 60

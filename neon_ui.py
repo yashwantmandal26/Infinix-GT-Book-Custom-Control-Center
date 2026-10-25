@@ -237,11 +237,16 @@ def icon(name, color='#92DFFF', size=24):
     elif name in ('gpu','game'):
         line([(7,6),(17,6),(21,10),(23,19),(19,20),(15,16),(9,16),(5,20),(1,19),(3,10),(7,6)])
         line([(5,11),(11,11)]);line([(8,8),(8,14)]);ellipse((16,9,18,11));ellipse((18,12,20,14))
-    elif name in ('ram','keyboard'):
+    elif name in ('keyboard',):
         box((2,5,22,19));
         for x in (6,10,14,18):
             line([(x,8),(x,10)]);line([(x,12),(x,14)])
         line([(7,17),(17,17)])
+    elif name in ('ram',):
+        box((2,7,22,17),1)
+        for px in (4,6,8,10,14,16,18,20):
+            line([(px,17),(px,19)])
+        box((4,9,9,14),1); box((15,9,20,14),1)
     elif name in ('refresh',):
         d.arc((3*s*size/24,3*s*size/24,21*s*size/24,21*s*size/24),35,320,fill=color,width=2*s)
         line([(17,2),(22,5),(18,9)])

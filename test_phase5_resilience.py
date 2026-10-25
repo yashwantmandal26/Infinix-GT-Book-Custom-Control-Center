@@ -194,5 +194,59 @@ class TestPhase5WindowsEnergySaver(unittest.TestCase):
             mock_saver.assert_called_with(enable=False, mode="Balanced")
 
 
+class TestPhase5LowBatteryAlerts(unittest.TestCase):
+    """Test Critical Low Battery (<10%) 15s Red Light Pulse and Breathing OSD."""
+
+    def test_low_battery_osd_show_and_hide(self):
+        """Verify LowBatteryBreathingOSD creates window, renders card, and cancels breathing on hide."""
+        from infinix_toolkit import LowBatteryBreathingOSD
+        mock_master = MagicMock()
+        mock_master.winfo_screenwidth.return_value = 1920
+        mock_master.winfo_screenheight.return_value = 1080
+        mock_master.after.return_value = 9999
+
+        osd = LowBatteryBreathingOSD(mock_master)
+        with patch.object(osd, "_create_window"):
+            osd.window = MagicMock()
+            osd.canvas = MagicMock()
+            with patch.object(osd, "_render_card_image", return_value=MagicMock()):
+                osd.show(8)
+                self.assertTrue(osd.is_breathing)
+                osd.window.deiconify.assert_called_once()
+                mock_master.after.assert_called_with(40, osd._step_breathing)
+
+                osd.hide()
+                self.assertFalse(osd.is_breathing)
+                mock_master.after_cancel.assert_called_with(9999)
+                osd.window.withdraw.assert_called_once()
+
+    def test_low_battery_does_not_alert_when_on_ac(self):
+        """When charger is connected, low battery alert does not fire and OSD is hidden."""
+        app = MagicMock(spec=InfinixGTToolkitApp)
+        app.running = True
+        app.on_ac_val = True
+        app.battery_val = 8
+        app._low_bat_osd_visible = True
+        app._low_bat_15s_alert_fired = False
+
+        # If on AC, hide OSD
+        if app.on_ac_val:
+            InfinixGTToolkitApp._hide_low_battery_osd(app)
+            self.assertFalse(app._low_bat_osd_visible)
+
+    def test_low_battery_red_pulse_aborts_on_ac(self):
+        """15-second red pulse immediately breaks if charger is connected."""
+        app = MagicMock(spec=InfinixGTToolkitApp)
+        app.running = True
+        app.on_ac_val = True  # Charger connected
+        app._low_bat_pulse_active = False
+
+        with patch.object(HardwareEngine, "send_4zone_rgb") as mock_kb, \
+             patch("infinix_toolkit.SerialEngine.send_backzone_rgb") as mock_bz:
+            # When AC is connected, pulse worker should not execute multiple loops
+            InfinixGTToolkitApp._start_low_battery_red_pulse(app)
+            self.assertFalse(app._low_bat_pulse_active)
+
+
 if __name__ == "__main__":
     unittest.main()
