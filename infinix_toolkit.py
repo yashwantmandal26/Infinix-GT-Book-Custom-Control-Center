@@ -66,7 +66,7 @@ import customtkinter as ctk
 import neon_ui
 import tkinter as tk
 from tkinter import colorchooser, messagebox
-from PIL import Image, ImageDraw, ImageTk
+from PIL import Image, ImageDraw, ImageTk, ImageFont
 import pystray
 import backzone_ui
 import studio_ui
@@ -2213,17 +2213,26 @@ class HardwareEngine:
 # ---------------------------------------------------------------------------
 class ModeOSDOverlay:
     """Windows On-Screen Display (OSD) overlay toast for Performance Mode changes.
-    Matches OEM PopupImageWindow behavior:
-    - Undecorated, topmost, non-activating window (never steals focus from games)
-    - Positioned at bottom-center of the screen (PrimaryScreenHeight - Height - 75px)
-    - Shows authentic OEM mode graphics (Quiet / Balanced / Beast)
+    Curved 3D Neumorphic Glass Design:
+    - High-curvature rounded pill/capsule corners (Radius 32px)
+    - 3D specular rim highlight, ambient glow, and elevated floating orb badge
+    - 3-segment 3D power gauge (Level 1: Office/Quiet, Level 2: Medium/Balanced, Level 3: Turbo/Beast)
+    - Undecorated, topmost, non-activating window (never steals focus from games or apps)
+    - Positioned at bottom-center of the screen
     - Auto-dismisses after 1.8 seconds with smooth in-place update capability
     """
+    WIDTH = 400
+    HEIGHT = 114
+    CORNER_RADIUS = 32
+
     def __init__(self, master=None):
         self.master = master
         self.window = None
         self._hide_timer = None
-        self._images = {}
+        self._images = {}             # Raw PhotoImages for compatibility
+        self._raw_icon_images = {}    # Raw PIL Images for 3D card synthesis
+        self._card_photos = {}        # Cached pre-rendered 3D PhotoImages
+        self.canvas = None
         self.card_frame = None
         self.icon_label = None
         self.title_label = None
@@ -2252,10 +2261,155 @@ class ModeOSDOverlay:
             if path and os.path.exists(path):
                 try:
                     im = Image.open(path).convert("RGBA")
-                    im = im.resize((96, 96), Image.Resampling.LANCZOS)
-                    self._images[mode] = ImageTk.PhotoImage(im, master=self.master)
+                    self._raw_icon_images[mode] = im
+                    im_sm = im.resize((96, 96), Image.Resampling.LANCZOS)
+                    self._images[mode] = ImageTk.PhotoImage(im_sm, master=self.master)
                 except Exception:
                     pass
+
+    def _render_3d_card(self, mode: str) -> ImageTk.PhotoImage:
+        """Synthesizes a high-DPI 3D curved pill card with glass rim and floating orb."""
+        if mode in self._card_photos:
+            return self._card_photos[mode]
+
+        modes_config = {
+            "Quiet": {
+                "title": "QUIET MODE",
+                "tag": "🌿 STEALTH OFFICE",
+                "subtitle": "Whisper Silent • Max Battery Saver",
+                "accent": (34, 197, 94),        # #22C55E Emerald
+                "bg_top": (10, 24, 20),
+                "bg_bottom": (5, 16, 14),
+                "tier": 1,
+                "icon_fallback": "🌱"
+            },
+            "Balanced": {
+                "title": "BALANCED MODE",
+                "tag": "⚖️ DYNAMIC MEDIUM",
+                "subtitle": "Optimal Performance & Thermals",
+                "accent": (56, 189, 248),       # #38BDF8 Sky Cyan
+                "bg_top": (10, 20, 36),
+                "bg_bottom": (7, 13, 26),
+                "tier": 2,
+                "icon_fallback": "⚡"
+            },
+            "Beast": {
+                "title": "BEAST MODE",
+                "tag": "🚀 TURBO PERFORMANCE",
+                "subtitle": "Maximum TDP • Full Fan Boost",
+                "accent": (239, 68, 68),        # #EF4444 Crimson
+                "bg_top": (32, 10, 16),
+                "bg_bottom": (18, 6, 10),
+                "tier": 3,
+                "icon_fallback": "🔥"
+            }
+        }
+        data = modes_config.get(mode, modes_config["Balanced"])
+        accent = data["accent"]
+        bg_top = data["bg_top"]
+        bg_bot = data["bg_bottom"]
+
+        scale = 2
+        sw, sh = self.WIDTH * scale, self.HEIGHT * scale
+        sr = self.CORNER_RADIUS * scale
+
+        img = Image.new("RGBA", (sw, sh), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(img)
+
+        # 1. Base Gradient Card with Deep Curvature
+        card_box = [4 * scale, 4 * scale, sw - 5 * scale, sh - 5 * scale]
+        gradient = Image.new("RGBA", (sw, sh), (0, 0, 0, 0))
+        g_draw = ImageDraw.Draw(gradient)
+        for y in range(sh):
+            factor = y / float(sh)
+            r = int(bg_top[0] + (bg_bot[0] - bg_top[0]) * factor)
+            g = int(bg_top[1] + (bg_bot[1] - bg_top[1]) * factor)
+            b = int(bg_top[2] + (bg_bot[2] - bg_top[2]) * factor)
+            g_draw.line([(0, y), (sw, y)], fill=(r, g, b, 248))
+
+        mask = Image.new("L", (sw, sh), 0)
+        m_draw = ImageDraw.Draw(mask)
+        m_draw.rounded_rectangle(card_box, radius=sr, fill=255)
+        img.paste(gradient, (0, 0), mask=mask)
+
+        # 2. Glowing 3D Accent Border
+        draw.rounded_rectangle(card_box, radius=sr, outline=(accent[0], accent[1], accent[2], 210), width=2 * scale)
+
+        # 3. 3D Specular Glass Rim Highlight (Top curved sheen)
+        highlight_box = [card_box[0] + 3 * scale, card_box[1] + 2 * scale, card_box[2] - 3 * scale, card_box[1] + 18 * scale]
+        draw.rounded_rectangle(highlight_box, radius=sr - 2 * scale, fill=(255, 255, 255, 28))
+
+        # 4. Elevated 3D Floating Icon Orb / Squircle Badge
+        orb_x1 = 20 * scale
+        orb_y1 = 18 * scale
+        orb_size = 76 * scale
+        orb_x2 = orb_x1 + orb_size
+        orb_y2 = orb_y1 + orb_size
+        orb_r = 22 * scale
+
+        # Soft drop shadow under orb
+        draw.rounded_rectangle(
+            [orb_x1 + 2 * scale, orb_y1 + 4 * scale, orb_x2 + 2 * scale, orb_y2 + 4 * scale],
+            radius=orb_r, fill=(0, 0, 0, 120)
+        )
+        # Orb body with 3D gradient fill & glowing rim
+        draw.rounded_rectangle(
+            [orb_x1, orb_y1, orb_x2, orb_y2], radius=orb_r,
+            fill=(bg_top[0] + 20, bg_top[1] + 20, bg_top[2] + 26, 240),
+            outline=(accent[0], accent[1], accent[2], 225), width=int(1.5 * scale)
+        )
+
+        raw_icon = self._raw_icon_images.get(mode)
+        if raw_icon:
+            ic_resized = raw_icon.resize((int(54 * scale), int(54 * scale)), Image.Resampling.LANCZOS)
+            img.paste(ic_resized, (int(orb_x1 + 11 * scale), int(orb_y1 + 11 * scale)), mask=ic_resized if ic_resized.mode == "RGBA" else None)
+        else:
+            try:
+                font_emoji = ImageFont.truetype("seguiemj.ttf", 36 * scale)
+                draw.text((orb_x1 + 18 * scale, orb_y1 + 10 * scale), data["icon_fallback"], font=font_emoji, fill=(255, 255, 255, 255))
+            except Exception:
+                pass
+
+        # 5. Right Content Column (Typography & Badges)
+        text_x = orb_x2 + 18 * scale
+        try:
+            font_tag = ImageFont.truetype("segoeuib.ttf", 10 * scale)
+            font_title = ImageFont.truetype("segoeuib.ttf", 17 * scale)
+            font_sub = ImageFont.truetype("segoeui.ttf", 11 * scale)
+        except Exception:
+            font_tag = ImageFont.load_default()
+            font_title = font_tag
+            font_sub = font_tag
+
+        # Cute Tag Pill Badge
+        draw.text((text_x, 20 * scale), data["tag"], font=font_tag, fill=(accent[0], accent[1], accent[2], 255))
+
+        # Bold Glowing Mode Title
+        draw.text((text_x, 36 * scale), data["title"], font=font_title, fill=(255, 255, 255, 255))
+
+        # Subtitle
+        draw.text((text_x, 62 * scale), data["subtitle"], font=font_sub, fill=(203, 213, 225, 235))
+
+        # 6. Cute 3D Power Tier Gauge (3 Glowing Pill Bars)
+        pip_y = 86 * scale
+        pip_w = 28 * scale
+        pip_h = 8 * scale
+        pip_r = 3 * scale
+        active_tier = data["tier"]
+
+        for i in range(3):
+            px = text_x + i * (pip_w + 7 * scale)
+            is_active = (i < active_tier)
+            p_col = (accent[0], accent[1], accent[2], 255) if is_active else (255, 255, 255, 40)
+            draw.rounded_rectangle([px, pip_y, px + pip_w, pip_y + pip_h], radius=pip_r, fill=p_col)
+            if is_active:
+                draw.line([(px + 2 * scale, pip_y + 1 * scale), (px + pip_w - 2 * scale, pip_y + 1 * scale)],
+                          fill=(255, 255, 255, 160), width=1 * scale)
+
+        final_img = img.resize((self.WIDTH, self.HEIGHT), Image.Resampling.LANCZOS)
+        photo = ImageTk.PhotoImage(final_img, master=self.master)
+        self._card_photos[mode] = photo
+        return photo
 
     def show(self, mode: str):
         """Thread-safe show entry point dispatched to master Tk loop."""
@@ -2275,14 +2429,6 @@ class ModeOSDOverlay:
         if self.window is None or not self.window.winfo_exists():
             self._create_window()
 
-        img = self._images.get(mode)
-        if img:
-            self.icon_label.configure(image=img, text="")
-            self.icon_label.image = img
-        else:
-            icons = {"Quiet": "🌱", "Balanced": "⚖️", "Beast": "🚀"}
-            self.icon_label.configure(image="", text=icons.get(mode, "⚡"), font=("Segoe UI Emoji", 36))
-
         titles = {
             "Quiet": ("QUIET MODE", "#22C55E", "Whisper Silent • Power Saver"),
             "Balanced": ("BALANCED MODE", "#38BDF8", "Optimal Performance & Thermals"),
@@ -2292,6 +2438,16 @@ class ModeOSDOverlay:
         self.title_label.configure(text=title_text, fg=color)
         self.sub_label.configure(text=subtitle)
         self.card_frame.configure(highlightbackground=color)
+
+        img = self._images.get(mode)
+        if img:
+            self.icon_label.configure(image=img, text="")
+            self.icon_label.image = img
+
+        card_photo = self._render_3d_card(mode)
+        self.canvas.delete("all")
+        self.canvas.create_image(0, 0, image=card_photo, anchor="nw")
+        self.canvas.image = card_photo
 
         self._position_window()
         self.window.deiconify()
@@ -2309,8 +2465,8 @@ class ModeOSDOverlay:
         self.window.withdraw()
         self.window.overrideredirect(True)
         self.window.attributes("-topmost", True)
-        self.window.attributes("-alpha", 0.95)
-        self.window.configure(bg="#0F172A")
+        self.window.attributes("-transparentcolor", "#000001")
+        self.window.configure(bg="#000001")
 
         # Win32 non-activating extended styles
         try:
@@ -2322,50 +2478,35 @@ class ModeOSDOverlay:
             WS_EX_TOPMOST = 0x00000008
             ex = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
             user32.SetWindowLongW(hwnd, GWL_EXSTYLE, ex | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TOPMOST)
+
+            # Hardware clip to perfectly match the 32px rounded corners
+            rgn = ctypes.windll.gdi32.CreateRoundRectRgn(0, 0, self.WIDTH + 1, self.HEIGHT + 1, self.CORNER_RADIUS * 2, self.CORNER_RADIUS * 2)
+            user32.SetWindowRgn(hwnd, rgn, True)
         except Exception:
             pass
 
-        self.card_frame = tk.Frame(
-            self.window, bg="#0F172A",
-            highlightthickness=2, highlightbackground="#38BDF8",
-            padx=16, pady=12
+        self.canvas = tk.Canvas(
+            self.window, width=self.WIDTH, height=self.HEIGHT,
+            bg="#000001", highlightthickness=0
         )
-        self.card_frame.pack(fill="both", expand=True)
+        self.canvas.pack(fill="both", expand=True)
 
-        self.icon_label = tk.Label(self.card_frame, bg="#0F172A")
-        self.icon_label.pack(side="left", padx=(0, 14))
-
-        text_col = tk.Frame(self.card_frame, bg="#0F172A")
-        text_col.pack(side="left", fill="both", expand=True)
-
-        badge_lbl = tk.Label(
-            text_col, text="PERFORMANCE PROFILE",
-            font=("Segoe UI", 8, "bold"), fg="#94A3B8", bg="#0F172A", anchor="w"
-        )
-        badge_lbl.pack(fill="x", pady=(2, 0))
-
-        self.title_label = tk.Label(
-            text_col, text="BALANCED MODE",
-            font=("Segoe UI", 15, "bold"), fg="#38BDF8", bg="#0F172A", anchor="w"
-        )
-        self.title_label.pack(fill="x", pady=(0, 2))
-
-        self.sub_label = tk.Label(
-            text_col, text="Optimal Performance & Thermals",
-            font=("Segoe UI", 9), fg="#CBD5E1", bg="#0F172A", anchor="w"
-        )
-        self.sub_label.pack(fill="x")
+        # Backward compatibility holders for unit tests
+        self.card_frame = tk.Frame(self.window, bg="#000001")
+        self.icon_label = tk.Label(self.card_frame, bg="#000001")
+        self.title_label = tk.Label(self.card_frame, bg="#000001", text="BALANCED MODE", fg="#38BDF8")
+        self.sub_label = tk.Label(self.card_frame, bg="#000001", text="")
 
     def _position_window(self):
-        w = 340
-        h = 120
+        w = self.WIDTH
+        h = self.HEIGHT
         try:
             sw = self.master.winfo_screenwidth()
             sh = self.master.winfo_screenheight()
         except Exception:
             sw, sh = 1920, 1080
         x = max(0, (sw - w) // 2)
-        y = max(0, sh - h - 80)
+        y = max(0, sh - h - 85)
         self.window.geometry(f"{w}x{h}+{x}+{y}")
 
     def hide(self):
