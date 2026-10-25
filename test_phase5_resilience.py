@@ -248,5 +248,36 @@ class TestPhase5LowBatteryAlerts(unittest.TestCase):
             self.assertFalse(app._low_bat_pulse_active)
 
 
+class TestPhase5SidebarPolish(unittest.TestCase):
+    """Test Option C Sidebar Polish: Quick Mode Switcher, Nav Badges & Active Glow."""
+
+    def test_quick_mode_select_updates_buttons(self):
+        """1-click quick mode selector updates mode_var and calls _on_mode_selected."""
+        app = MagicMock(spec=InfinixGTToolkitApp)
+        app.mode_var = MagicMock()
+        InfinixGTToolkitApp._quick_mode_select(app, "Beast")
+        app.mode_var.set.assert_called_once_with("Beast")
+        app._on_mode_selected.assert_called_once_with(source="sidebar_quick")
+        app._update_sidebar_mode_buttons.assert_called_once_with("Beast")
+
+    def test_sidebar_mode_buttons_highlight_active_color(self):
+        """Active mode button is configured with signature color, while idle ones become transparent."""
+        app = MagicMock(spec=InfinixGTToolkitApp)
+        btn_quiet = MagicMock()
+        btn_bal = MagicMock()
+        btn_beast = MagicMock()
+        app.sidebar_mode_btns = {
+            "Quiet": (btn_quiet, "#16A34A"),
+            "Balanced": (btn_bal, "#0284C7"),
+            "Beast": (btn_beast, "#DC2626")
+        }
+
+        # Select Quiet
+        InfinixGTToolkitApp._update_sidebar_mode_buttons(app, "Quiet")
+        btn_quiet.configure.assert_called_with(fg_color="#16A34A", text_color="#FFFFFF", font=unittest.mock.ANY)
+        btn_bal.configure.assert_called_with(fg_color="transparent", text_color=unittest.mock.ANY, font=unittest.mock.ANY)
+        btn_beast.configure.assert_called_with(fg_color="transparent", text_color=unittest.mock.ANY, font=unittest.mock.ANY)
+
+
 if __name__ == "__main__":
     unittest.main()

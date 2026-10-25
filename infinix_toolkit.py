@@ -3631,6 +3631,8 @@ class InfinixGTToolkitApp:
 
         if hasattr(self, "_set_mode_apply_status"):
             self._set_mode_apply_status(f"●  {display_mode} mode active", THEME["accent_green"])
+            if hasattr(self, "_update_sidebar_mode_buttons"):
+                self._update_sidebar_mode_buttons(mode)
 
         if hasattr(self, "_save_config"):
             self._save_config()
@@ -4403,21 +4405,23 @@ class InfinixGTToolkitApp:
         brand_row = ctk.CTkFrame(brand_box, fg_color="transparent")
         brand_row.pack(anchor="w")
 
-        bolt_lbl = ctk.CTkLabel(brand_row, text="GT", width=36, height=36, corner_radius=10, fg_color=("#E4EEFF", "#172F4B"),
-                               font=ctk.CTkFont(size=16, weight="bold"),
-                               text_color=THEME["accent_blue"])
+        bolt_lbl = ctk.CTkLabel(brand_row, text="GT", width=38, height=38, corner_radius=11, fg_color=("#E4EEFF", "#13273F"),
+                               font=ctk.CTkFont(size=17, weight="bold"),
+                               text_color="#38BDF8")
         bolt_lbl.pack(side="left", padx=(0, 7))
 
         title_lbl = ctk.CTkLabel(brand_row, text="Infinix Toolkit", font=ctk.CTkFont(size=16, weight="bold"), text_color=THEME["text_primary"])
         title_lbl.pack(side="left")
 
-        ctk.CTkLabel(
+        ver_badge = ctk.CTkLabel(
             brand_row, text=f"v{APP_VERSION}",
             font=ctk.CTkFont(size=11, weight="bold"),
-            text_color=THEME["accent_blue"],
+            text_color="#38BDF8",
             fg_color=THEME["pill_bg"], corner_radius=7,
-            padx=7, pady=2
-        ).pack(side="left", padx=(7, 0), pady=(2, 0))
+            padx=8, pady=3, cursor="hand2"
+        )
+        ver_badge.pack(side="left", padx=(7, 0), pady=(2, 0))
+        ver_badge.bind("<Button-1>", lambda event: self._select_nav("about"))
 
         sub_lbl = ctk.CTkLabel(brand_box, text="GT BOOK  /  CONTROL CENTER", anchor="w", height=20,
                                font=ctk.CTkFont(size=10, weight="bold"), text_color=THEME["text_muted"])
@@ -4428,6 +4432,7 @@ class InfinixGTToolkitApp:
 
         # Nav Buttons Container
         self.nav_buttons = {}
+        self.nav_badges = {}
         nav_items = [
             ("lighting", "Lighting studio"),
             ("backzone", "Rear light bar"),
@@ -4444,21 +4449,62 @@ class InfinixGTToolkitApp:
                              text_color=THEME["text_secondary"]).pack(anchor="w", padx=20, pady=(12, 4))
             btn = ctk.CTkButton(
                 self.sidebar, text=title, image=neon_ui.icon(key, '#7F9BBA', 18),
-                anchor="w", height=40, corner_radius=10, border_spacing=12,
+                anchor="w", height=42, corner_radius=10, border_spacing=12,
                 fg_color="transparent", text_color=THEME["nav_idle_text"],
                 hover_color=THEME["nav_hover"], font=ctk.CTkFont(size=13),
                 command=lambda k=key: self._select_nav(k)
             )
             btn.pack(fill="x", padx=8, pady=2)
             self.nav_buttons[key] = btn
+
+            # Subtle keyboard shortcut badge inside button
+            badge = ctk.CTkLabel(
+                btn, text=f"Alt {index + 1}",
+                font=ctk.CTkFont(size=10, weight="bold"),
+                text_color=THEME["text_muted"],
+                fg_color=("#E2E8F0", "#182635"),
+                corner_radius=5, padx=6, pady=2
+            )
+            badge.place(relx=0.96, rely=0.5, anchor="e")
+            badge.bind("<Button-1>", lambda event, k=key: self._select_nav(k))
+            self.nav_badges[key] = badge
+
             self.root.bind(f"<Alt-Key-{index + 1}>", lambda event, k=key: self._select_nav(k))
 
-        ctk.CTkLabel(self.sidebar, text="ALT 1–5   ·   Quick navigation", font=ctk.CTkFont(size=10),
-                     text_color=THEME["text_secondary"]).pack(anchor="w", padx=20, pady=(12, 0))
+        # -------------------------------------------------------------------
+        # Sidebar Quick Mode Switcher (1-Click Instant Laptop Mode Control)
+        # -------------------------------------------------------------------
+        quick_mode_box = ctk.CTkFrame(self.sidebar, fg_color=THEME["card_sub_bg"], corner_radius=12, border_width=1, border_color=("#DCE4EE", "#23344A"))
+        quick_mode_box.pack(fill="x", padx=8, pady=(14, 2))
+
+        qm_hdr = ctk.CTkFrame(quick_mode_box, fg_color="transparent")
+        qm_hdr.pack(fill="x", padx=12, pady=(6, 2))
+        ctk.CTkLabel(qm_hdr, text="⚡ Performance Mode", font=ctk.CTkFont(size=11, weight="bold"), text_color=THEME["text_secondary"]).pack(side="left")
+
+        self.sidebar_mode_btns = {}
+        qm_row = ctk.CTkFrame(quick_mode_box, fg_color="transparent")
+        qm_row.pack(fill="x", padx=8, pady=(0, 6))
+        qm_row.grid_columnconfigure((0, 1, 2), weight=1, uniform="qm_modes")
+
+        modes_meta = [
+            ("Quiet", "🌿 Quiet", "#16A34A"),
+            ("Balanced", "⚖️ Medium", "#0284C7"),
+            ("Beast", "🚀 Turbo", "#DC2626")
+        ]
+        for col_idx, (m_key, m_title, m_color) in enumerate(modes_meta):
+            m_btn = ctk.CTkButton(
+                qm_row, text=m_title, height=28, corner_radius=7,
+                font=ctk.CTkFont(size=11, weight="bold"),
+                fg_color="transparent", text_color=THEME["text_muted"],
+                hover_color=("#E2E8F0", "#1E293B"),
+                command=lambda k=m_key: self._quick_mode_select(k)
+            )
+            m_btn.grid(row=0, column=col_idx, padx=2, sticky="nsew")
+            self.sidebar_mode_btns[m_key] = (m_btn, m_color)
 
         # Bottom Mini Status Chip
         side_footer = ctk.CTkFrame(self.sidebar, fg_color=THEME["card_sub_bg"], corner_radius=14, border_width=1, border_color=("#DCE4EE", "#23344A"))
-        side_footer.pack(fill="x", padx=8, pady=(22, 4))
+        side_footer.pack(fill="x", padx=8, pady=(10, 4))
 
         # Live Status Chip & Suggested Action
         self.side_status_badge = ctk.CTkLabel(
@@ -4494,7 +4540,7 @@ class InfinixGTToolkitApp:
             text_color=THEME["accent_blue"]
         )
         self.side_cpu_lbl.pack(anchor="w", padx=12, pady=1)
-        self.side_cpu_bar = ctk.CTkProgressBar(cpu_card, height=3, progress_color=THEME["accent_blue"], fg_color=THEME["progress_bg"])
+        self.side_cpu_bar = ctk.CTkProgressBar(cpu_card, height=6, corner_radius=3, progress_color=THEME["accent_blue"], fg_color="#162335")
         self.side_cpu_bar.pack(fill="x", padx=14, pady=(1, 3)); self.side_cpu_bar.set(0)
 
         gpu_card = metric_card('gpu', '#30D9C4')
@@ -4504,7 +4550,7 @@ class InfinixGTToolkitApp:
             text_color=THEME["accent_cyan"]
         )
         self.side_gpu_lbl.pack(anchor="w", padx=12, pady=1)
-        self.side_gpu_bar = ctk.CTkProgressBar(gpu_card, height=3, progress_color=THEME["accent_cyan"], fg_color=THEME["progress_bg"])
+        self.side_gpu_bar = ctk.CTkProgressBar(gpu_card, height=6, corner_radius=3, progress_color=THEME["accent_cyan"], fg_color="#162335")
         self.side_gpu_bar.pack(fill="x", padx=14, pady=(1, 3)); self.side_gpu_bar.set(0)
 
         ram_card = metric_card('ram', '#A78BFA')
@@ -4514,7 +4560,7 @@ class InfinixGTToolkitApp:
             text_color=THEME["accent_purple"]
         )
         self.side_ram_lbl.pack(anchor="w", padx=12, pady=1)
-        self.side_ram_bar = ctk.CTkProgressBar(ram_card, height=3, progress_color=THEME["accent_purple"], fg_color=THEME["progress_bg"])
+        self.side_ram_bar = ctk.CTkProgressBar(ram_card, height=6, corner_radius=3, progress_color=THEME["accent_purple"], fg_color="#162335")
         self.side_ram_bar.pack(fill="x", padx=14, pady=(1, 3)); self.side_ram_bar.set(0)
 
         init_bat_txt = "Battery: --%"
@@ -4531,7 +4577,7 @@ class InfinixGTToolkitApp:
         )
         self.side_bat_lbl.pack(anchor="w", padx=(10, 4), pady=(1, 1))
         self.side_bat_lbl.bind("<Button-1>", lambda event: self._about_refresh_live(silent=False))
-        self.side_bat_bar = ctk.CTkProgressBar(battery_card, height=3, progress_color="#39E86B", fg_color=THEME["progress_bg"])
+        self.side_bat_bar = ctk.CTkProgressBar(battery_card, height=6, corner_radius=3, progress_color="#39E86B", fg_color="#162335")
         self.side_bat_bar.pack(fill="x", padx=14, pady=(1, 3)); self.side_bat_bar.set(0)
 
         # Navigation and live metrics share a fixed, non-scrolling sidebar.
@@ -4546,19 +4592,27 @@ class InfinixGTToolkitApp:
         for k, btn in self.nav_buttons.items():
             if k == key:
                 btn.configure(
-                    fg_color=("#E5EFFF", "#1A3453"),
-                    text_color=("#1659A6", "#D9EBFF"),
-                    border_width=0,
-                    border_color=THEME["nav_active_border"],
-                    hover_color=("#E5EFFF", "#1A3453")
+                    fg_color=("#E5EFFF", "#162E48"),
+                    text_color=("#1659A6", "#FFFFFF"),
+                    border_width=1,
+                    border_color="#38BDF8",
+                    font=ctk.CTkFont(size=13, weight="bold"),
+                    image=neon_ui.icon(k, '#38BDF8', 18),
+                    hover_color=("#E5EFFF", "#162E48")
                 )
+                if hasattr(self, "nav_badges") and k in self.nav_badges:
+                    self.nav_badges[k].configure(fg_color="#0284C7", text_color="#FFFFFF")
             else:
                 btn.configure(
                     fg_color="transparent",
                     text_color=THEME["nav_idle_text"],
                     border_width=0,
+                    font=ctk.CTkFont(size=13, weight="normal"),
+                    image=neon_ui.icon(k, '#7F9BBA', 18),
                     hover_color=THEME["nav_hover"]
                 )
+                if hasattr(self, "nav_badges") and k in self.nav_badges:
+                    self.nav_badges[k].configure(fg_color=("#E2E8F0", "#182635"), text_color=THEME["text_muted"])
 
         for k, page in self.pages.items():
             if k == key:
@@ -8214,6 +8268,33 @@ class InfinixGTToolkitApp:
     def _finish_startup_command(self, result, context):
         self._set_hardware_status(result.ok, context, result.error)
 
+
+    def _quick_mode_select(self, mode: str):
+        """1-click instant performance mode switcher from the sidebar."""
+        self.mode_var.set(mode)
+        self._on_mode_selected(source="sidebar_quick")
+        self._update_sidebar_mode_buttons(mode)
+
+    def _update_sidebar_mode_buttons(self, active_mode: str):
+        """Update active highlight on the sidebar quick mode buttons."""
+        if not hasattr(self, "sidebar_mode_btns"):
+            return
+        font_bold = getattr(self, "_font_qm_bold", ("Segoe UI", 11, "bold"))
+        font_normal = getattr(self, "_font_qm_normal", ("Segoe UI", 11))
+        for m_key, (btn, active_color) in self.sidebar_mode_btns.items():
+            if m_key == active_mode:
+                btn.configure(
+                    fg_color=active_color,
+                    text_color="#FFFFFF",
+                    font=font_bold
+                )
+            else:
+                btn.configure(
+                    fg_color="transparent",
+                    text_color=THEME["text_muted"],
+                    font=font_normal
+                )
+
     def _on_mode_selected(self, source: str = "Manual selection", automatic: bool = False):
         mode = self.mode_var.get()
         previous_mode = self.config.get("power_mode", "Balanced")
@@ -9825,11 +9906,13 @@ class InfinixGTToolkitApp:
                 self.side_gpu_bar.set(max(0.0, min(1.0, gpu_p_val / 100.0)))
                 self.side_gpu_bar.configure(progress_color=gpu_color)
             if hasattr(self, 'side_ram_lbl'):
-                self.side_ram_lbl.configure(text=f"RAM: {ram_p:.0f}%")
+                ram_color = THEME["accent_rose"] if ram_p >= 85 else THEME["accent_amber"] if ram_p >= 70 else THEME["accent_purple"]
+                self.side_ram_lbl.configure(text=f"RAM: {ram_p:.0f}%", text_color=ram_color)
                 self.side_ram_bar.set(max(0.0, min(1.0, ram_p / 100.0)))
+                self.side_ram_bar.configure(progress_color=ram_color)
             if hasattr(self, 'side_bat_lbl'):
-                bat_icon = "⚡" if on_ac else "🔋"
-                bat_txt = f"{bat_icon} Battery: {bat_pct}%"
+                bat_status = " (Charging)" if on_ac else ""
+                bat_txt = f"Battery: {bat_pct}%{bat_status}" 
                 bat_hp = getattr(self, '_cached_bat_health_pct', None)
                 if bat_hp is not None and bat_hp > 0:
                     h_val = f"{bat_hp:.1f}%" if (bat_hp % 1 != 0) else f"{int(bat_hp)}%"
