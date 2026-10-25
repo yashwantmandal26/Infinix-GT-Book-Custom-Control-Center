@@ -2069,15 +2069,164 @@ class HardwareEngine:
             return False
 
     @classmethod
+    def set_windows_energy_saver(cls, enable: bool, mode: str = "Quiet") -> bool:
+        """Switch Windows 11 Energy Saver state, power mode overlay, and thresholds.
+
+        - Quiet (Power Saving / Office Mode):
+            - Activates 'Best power efficiency' overlay (961cc777-2547-4f9d-8174-7d86181b8a7a)
+            - Sets DC and AC battery thresholds to 100% so Energy Saver is active immediately on AC & Battery
+            - Sets system EnergySaverState and ECP_WhatIf registry values to 1
+            - Broadcasts WM_SETTINGCHANGE notification to Windows Shell & Quick Settings
+        - Balanced / Beast (Medium / Gaming Mode):
+            - Restores Balanced (00000000-0000-0000-0000-000000000000) or Beast (ded574b5-45a0-4f42-8737-46345c09c238)
+            - Restores standard battery saver threshold (30% Balanced, 20% Beast; 0% AC)
+            - Restores system EnergySaverState and ECP_WhatIf to 0 (disabling forced saver)
+            - Broadcasts WM_SETTINGCHANGE notification
+        """
+        overlay_map = {
+            "Quiet": "961cc777-2547-4f9d-8174-7d86181b8a7a",    # Best power efficiency
+            "Balanced": "00000000-0000-0000-0000-000000000000", # Balanced
+            "Beast": "ded574b5-45a0-4f42-8737-46345c09c238"     # Best performance
+        }
+        overlay_guid = overlay_map.get(mode, overlay_map["Quiet"] if enable else overlay_map["Balanced"])
+
+        # 1. Native powrprof API call to set Active Overlay Scheme
+        try:
+            import ctypes, uuid
+            class _GUID(ctypes.Structure):
+                _fields_ = [
+                    ('Data1', ctypes.c_ulong),
+                    ('Data2', ctypes.c_ushort),
+                    ('Data3', ctypes.c_ushort),
+                    ('Data4', ctypes.c_ubyte * 8)
+                ]
+                @classmethod
+                def from_uuid(cls, u):
+                    return cls(u.time_low, u.time_mid, u.time_hi_version, (ctypes.c_ubyte * 8)(*u.bytes[8:]))
+            if hasattr(ctypes, "windll") and hasattr(ctypes.windll, "powrprof"):
+                g = _GUID.from_uuid(uuid.UUID(overlay_guid))
+                ctypes.windll.powrprof.PowerSetActiveOverlayScheme(ctypes.byref(g))
+        except Exception:
+            pass
+
+        # 2. Configure powercfg thresholds for Energy Saver
+        try:
+            dc_thresh = "100" if enable else ("20" if mode == "Beast" else "30")
+            ac_thresh = "100" if enable else "0"
+
+            # Canonical GUIDs for Energy Saver subgroup and Charge Level setting
+            subprocess.run(
+                ["powercfg.exe", "/setdcvalueindex", "SCHEME_CURRENT", "de830923-a562-41af-a086-e3a2c6bad2da", "e69653ca-cf7f-4f05-aa73-cb833fa90ad4", dc_thresh],
+                capture_output=True, text=True,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0), timeout=5
+            )
+            subprocess.run(
+                ["powercfg.exe", "/setacvalueindex", "SCHEME_CURRENT", "de830923-a562-41af-a086-e3a2c6bad2da", "e69653ca-cf7f-4f05-aa73-cb833fa90ad4", ac_thresh],
+                capture_output=True, text=True,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0), timeout=5
+            )
+            # Friendly aliases
+            subprocess.run(
+                ["powercfg.exe", "/setdcvalueindex", "SCHEME_CURRENT", "SUB_ENERGYSAVER", "ESBATTTHRESHOLD", dc_thresh],
+                capture_output=True, text=True,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0), timeout=5
+            )
+            subprocess.run(
+                ["powercfg.exe", "/setacvalueindex", "SCHEME_CURRENT", "SUB_ENERGYSAVER", "ESBATTTHRESHOLD", ac_thresh],
+                capture_output=True, text=True,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0), timeout=5
+            )
+            subprocess.run(
+                ["powercfg.exe", "/setactive", "SCHEME_CURRENT"],
+                capture_output=True, text=True,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0), timeout=5
+            )
+        except Exception:
+            pass
+
+        # 3. Update Windows Registry for Energy Saver & Active Overlays
+        try:
+            import winreg
+            try:
+                with winreg.OpenKey(
+                    winreg.HKEY_LOCAL_MACHINE,
+                    r"SYSTEM\CurrentControlSet\Control\Power\User\PowerSchemes",
+                    0, winreg.KEY_SET_VALUE
+                ) as key:
+                    winreg.SetValueEx(key, "ActiveOverlayAcPowerScheme", 0, winreg.REG_SZ, overlay_guid)
+                    winreg.SetValueEx(key, "ActiveOverlayDcPowerScheme", 0, winreg.REG_SZ, overlay_guid)
+            except Exception:
+                pass
+
+            try:
+                with winreg.OpenKey(
+                    winreg.HKEY_LOCAL_MACHINE,
+                    r"SYSTEM\CurrentControlSet\Control\Power",
+                    0, winreg.KEY_SET_VALUE
+                ) as key:
+                    winreg.SetValueEx(key, "EnergySaverState", 0, winreg.REG_DWORD, 1 if enable else 0)
+            except Exception:
+                pass
+
+            try:
+                with winreg.CreateKey(
+                    winreg.HKEY_LOCAL_MACHINE,
+                    r"SOFTWARE\Microsoft\Windows\CurrentVersion\whesvc"
+                ) as key:
+                    winreg.SetValueEx(key, "ECP_WhatIf", 0, winreg.REG_DWORD, 1 if enable else 0)
+            except Exception:
+                pass
+
+            try:
+                with winreg.CreateKey(
+                    winreg.HKEY_LOCAL_MACHINE,
+                    r"SOFTWARE\Policies\Microsoft\Power\EnergySaver"
+                ) as key:
+                    winreg.SetValueEx(key, "EnableEnergySaver", 0, winreg.REG_DWORD, 1 if enable else 0)
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+        # 4. Broadcast system settings change so Windows Shell / Quick Settings updates
+        try:
+            import ctypes
+            if hasattr(ctypes, "windll") and hasattr(ctypes.windll, "user32"):
+                ctypes.windll.user32.SendMessageTimeoutW(
+                    0xFFFF, 0x001A, 0, "SystemUtility", 0x0002, 1000, None
+                )
+        except Exception:
+            pass
+
+        return True
+
+    @classmethod
+    def get_windows_energy_saver_state(cls) -> bool:
+        """Check if Windows Energy Saver is active in registry or power overlay."""
+        try:
+            import winreg
+            with winreg.OpenKey(
+                winreg.HKEY_LOCAL_MACHINE,
+                r"SYSTEM\CurrentControlSet\Control\Power",
+                0, winreg.KEY_READ
+            ) as key:
+                val, _ = winreg.QueryValueEx(key, "EnergySaverState")
+                if val == 1:
+                    return True
+        except Exception:
+            pass
+        return (cls._last_power_plan_mode == "Quiet")
+
+    @classmethod
     def set_windows_power_plan(cls, mode: str) -> bool:
         """Switch the Windows power scheme, configure Windows Energy Saver, and adjust screen brightness.
 
-        - Quiet (Power Saving Mode):
+        - Quiet (Power Saving / Office Mode):
             - Automatically enables Windows Energy Saver (sets AC and DC threshold to 100%)
             - Switches active Windows power scheme to Power Saver (a1841308-3541-4fab-bc81-f71556f20b4a)
             - Automatically decreases internal screen display brightness by 5%
             - Configures Windows 11 Modern Power Mode overlay to 'Best power efficiency'
-        - Balanced / Beast (Gaming):
+        - Balanced / Beast (Medium / Gaming Mode):
             - Restores Windows Balanced or High Performance power scheme
             - Restores normal Windows Energy Saver thresholds (disabling forced saver)
             - Restores previously saved screen brightness if dimmed upon entering Quiet mode
@@ -2121,84 +2270,10 @@ class HardwareEngine:
         except Exception:
             ok = False
 
-        # 3. Configure Windows Energy Saver (thresholds and policy)
-        try:
-            if is_quiet:
-                # Force Energy Saver on DC (battery) to 100% so it is immediately active
-                subprocess.run(
-                    ["powercfg.exe", "/setdcvalueindex", "SCHEME_CURRENT", "SUB_ENERGYSAVER", "ESBATTTHRESHOLD", "100"],
-                    capture_output=True, text=True,
-                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0), timeout=5
-                )
-                # Force Energy Saver on AC (plugged in) to 100%
-                subprocess.run(
-                    ["powercfg.exe", "/setacvalueindex", "SCHEME_CURRENT", "SUB_ENERGYSAVER", "ESBATTTHRESHOLD", "100"],
-                    capture_output=True, text=True,
-                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0), timeout=5
-                )
-            else:
-                # Restore default thresholds (DC: 30% for Balanced, 20% for Beast; AC: 0%)
-                dc_thresh = "20" if mode == "Beast" else "30"
-                subprocess.run(
-                    ["powercfg.exe", "/setdcvalueindex", "SCHEME_CURRENT", "SUB_ENERGYSAVER", "ESBATTTHRESHOLD", dc_thresh],
-                    capture_output=True, text=True,
-                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0), timeout=5
-                )
-                subprocess.run(
-                    ["powercfg.exe", "/setacvalueindex", "SCHEME_CURRENT", "SUB_ENERGYSAVER", "ESBATTTHRESHOLD", "0"],
-                    capture_output=True, text=True,
-                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0), timeout=5
-                )
-            # Re-activate current scheme so threshold changes take effect immediately
-            subprocess.run(
-                ["powercfg.exe", "/setactive", "SCHEME_CURRENT"],
-                capture_output=True, text=True,
-                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0), timeout=5
-            )
-        except Exception:
-            pass
+        # 3. Synchronize Windows Energy Saver, power mode overlay & registry policy
+        cls.set_windows_energy_saver(enable=is_quiet, mode=mode)
 
-        # 4. Update Windows 11 Modern Power Overlay & Registry Policy
-        try:
-            import winreg
-            overlay_map = {
-                "Quiet": "961cc777-2547-4f9d-8174-7d86181b8a7a",    # Best power efficiency
-                "Balanced": "00000000-0000-0000-0000-000000000000", # Balanced
-                "Beast": "ded574b5-45a0-4f42-8737-46345c09c238"     # Best performance
-            }
-            overlay_guid = overlay_map.get(mode, overlay_map["Balanced"])
-            try:
-                with winreg.OpenKey(
-                    winreg.HKEY_LOCAL_MACHINE,
-                    r"SYSTEM\CurrentControlSet\Control\Power\User\PowerSchemes",
-                    0, winreg.KEY_SET_VALUE
-                ) as key:
-                    winreg.SetValueEx(key, "ActiveOverlayAcPowerScheme", 0, winreg.REG_SZ, overlay_guid)
-                    winreg.SetValueEx(key, "ActiveOverlayDcPowerScheme", 0, winreg.REG_SZ, overlay_guid)
-            except Exception:
-                pass
-
-            try:
-                with winreg.OpenKey(
-                    winreg.HKEY_LOCAL_MACHINE,
-                    r"SYSTEM\CurrentControlSet\Control\Power",
-                    0, winreg.KEY_SET_VALUE
-                ) as key:
-                    winreg.SetValueEx(key, "EnergySaverState", 0, winreg.REG_DWORD, 1 if is_quiet else 0)
-            except Exception:
-                pass
-
-            try:
-                key_path = r"SOFTWARE\Policies\Microsoft\Power\EnergySaver"
-                key = winreg.CreateKey(winreg.HKEY_LOCAL_MACHINE, key_path)
-                winreg.SetValueEx(key, "EnableEnergySaver", 0, winreg.REG_DWORD, 1 if is_quiet else 0)
-                winreg.CloseKey(key)
-            except Exception:
-                pass
-        except Exception:
-            pass
-
-        # 5. Apply the target screen brightness or preserve existing display brightness
+        # 4. Apply the target screen brightness or preserve existing display brightness
         if target_brightness is not None:
             cls.set_display_brightness(target_brightness)
         elif not is_quiet and current_brightness is not None:

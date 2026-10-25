@@ -132,5 +132,67 @@ class TestPhase5LowIdleFootprint(unittest.TestCase):
         app._ui_mailbox.post.assert_called_once()
 
 
+class TestPhase5WindowsEnergySaver(unittest.TestCase):
+    """Test Windows 11 Energy Saver and Modern Power Overlay synchronization."""
+
+    def setUp(self):
+        HardwareEngine._last_power_plan_mode = "Balanced"
+        HardwareEngine._saved_pre_quiet_brightness = None
+
+    def test_quiet_mode_engages_energy_saver_overlay_and_thresholds(self):
+        """Quiet/Office mode automatically activates Energy Saver overlay and 100% threshold."""
+        with patch("subprocess.run") as mock_run, \
+             patch("ctypes.windll.powrprof.PowerSetActiveOverlayScheme", create=True) as mock_overlay, \
+             patch("ctypes.windll.user32.SendMessageTimeoutW", create=True):
+            mock_run.return_value.returncode = 0
+            
+            res = HardwareEngine.set_windows_energy_saver(True, "Quiet")
+            self.assertTrue(res)
+
+            # Overlay API must be called
+            self.assertTrue(mock_overlay.called)
+            
+            # Check powercfg calls for 100% threshold on DC and AC
+            called_cmds = [call_args[0][0] for call_args in mock_run.call_args_list]
+            self.assertTrue(any("100" in cmd and "/setdcvalueindex" in cmd for cmd in called_cmds))
+            self.assertTrue(any("100" in cmd and "/setacvalueindex" in cmd for cmd in called_cmds))
+
+    def test_balanced_and_beast_mode_restores_energy_saver(self):
+        """Balanced and Beast mode restore standard thresholds and normal overlays."""
+        with patch("subprocess.run") as mock_run, \
+             patch("ctypes.windll.powrprof.PowerSetActiveOverlayScheme", create=True) as mock_overlay, \
+             patch("ctypes.windll.user32.SendMessageTimeoutW", create=True):
+            mock_run.return_value.returncode = 0
+
+            # Balanced
+            res_bal = HardwareEngine.set_windows_energy_saver(False, "Balanced")
+            self.assertTrue(res_bal)
+            bal_cmds = [call_args[0][0] for call_args in mock_run.call_args_list]
+            self.assertTrue(any("30" in cmd and "/setdcvalueindex" in cmd for cmd in bal_cmds))
+            self.assertTrue(any("0" in cmd and "/setacvalueindex" in cmd for cmd in bal_cmds))
+
+            mock_run.reset_mock()
+            # Beast
+            res_beast = HardwareEngine.set_windows_energy_saver(False, "Beast")
+            self.assertTrue(res_beast)
+            beast_cmds = [call_args[0][0] for call_args in mock_run.call_args_list]
+            self.assertTrue(any("20" in cmd and "/setdcvalueindex" in cmd for cmd in beast_cmds))
+            self.assertTrue(any("0" in cmd and "/setacvalueindex" in cmd for cmd in beast_cmds))
+
+    def test_power_plan_integration_invokes_energy_saver(self):
+        """set_windows_power_plan calls set_windows_energy_saver with correct parameters."""
+        with patch.object(HardwareEngine, "set_windows_energy_saver") as mock_saver, \
+             patch.object(HardwareEngine, "get_display_brightness", return_value=80), \
+             patch.object(HardwareEngine, "set_display_brightness"), \
+             patch("subprocess.run") as mock_run:
+            mock_run.return_value.returncode = 0
+
+            HardwareEngine.set_windows_power_plan("Quiet")
+            mock_saver.assert_called_with(enable=True, mode="Quiet")
+
+            HardwareEngine.set_windows_power_plan("Balanced")
+            mock_saver.assert_called_with(enable=False, mode="Balanced")
+
+
 if __name__ == "__main__":
     unittest.main()
